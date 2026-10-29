@@ -31,7 +31,7 @@ from xml.sax.saxutils import escape
 
 FROZEN = getattr(sys, "frozen", False)  # the installed .exe
 # "Publish Update.bat" bumps this and uploads the build; installed copies update themselves to it.
-VERSION = "1.0.9"
+VERSION = "1.0.10"
 UPDATE_REPO = "xoxoFaith1993/hunt-tracker"
 # A one-file .exe unpacks to a temp folder that __file__ points into; the install folder is the exe's.
 HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
@@ -700,6 +700,9 @@ HEADLINE = {"Kills/Deaths": "K/D", "KDA Ratio": "KDA", "Kills/Deaths/Assists": "
 KD_TOOLTIP = re.compile(r"(Players Killed|Killed by Player|Kill Assists)\s*:\s*([\d,]+)", re.I)
 
 
+HUNTER_MOST = "Hunter With Most Kills: "  # + the hunter's name, as read_profile_stat returns it
+
+
 def read_profile_stat(words: list, w: int, h: int, px: bytes, png: Path):
     """Player Profile > Statistic: the hovered stat's name is the title on the left; the card on
     the right shows its value in the top slot. -> (name, value) or None."""
@@ -715,8 +718,14 @@ def read_profile_stat(words: list, w: int, h: int, px: bytes, png: Path):
         return None
     top = card[0]  # the card's first slot shows the hovered stat
     label = " ".join(q[4] for q in top if not NUM.match(q[4]))
-    if name.lower().startswith("variant with most") and family_of(re.sub(r"\s+Kills?$", "", label)):
-        name = re.sub(r"\s+K(?:i|il|ill|ills)?$", "", label) + " Kills"  # the card names the variant
+    short = re.sub(r"\s+K(?:i|il|ill|ills)?$", "", label)
+    if name.lower().startswith("variant with most") and family_of(short):
+        name = short + " Kills"  # the card names the variant
+    elif name.lower().startswith("hunter with most"):
+        # The card names the hunter ("Lilith Kills 318").
+        if short == label or not re.fullmatch(r"[A-Z][\w'.-]+( [A-Z][\w'.-]+)?", short) or family_of(short):
+            return None  # the card hasn't caught up with the hover yet
+        name = HUNTER_MOST + short
     elif player_key(label)[:6] != player_key(name)[:6]:
         return None  # the card hasn't caught up with the hover yet
     if NUM.match(top[-1][4]):
@@ -1463,10 +1472,9 @@ class Tracker:
                                   "names": [c["name"] for c in cols if self._key(c["name"]) != me]}
         for c in cols:
             if self._key(c["name"]) == me:
-                # Your own column on the squad page counts some stats differently from your
-                # Statistics page (Monsters Killed), so your Career numbers only come from that page.
                 if kind != "lobby" and m is not None:
                     self._note_hunter_kills(c["stats"], m)
+                self.note_my_stats(c["stats"])
                 continue
             p = self._player(c["name"])
             # Squad-page stats and card stats are kept apart: a card never overwrites the page.
@@ -1485,6 +1493,35 @@ class Tracker:
                     m["cards"].append(c["name"])
         self.changed_at = time.time()
         self._save()
+
+    def note_my_stats(self, stats: dict) -> None:
+        """Your own column on the squad stats page (or your loading card) into your Career stats.
+        Monsters Killed is left out: that page counts it differently from your Statistics page.
+        A count never goes down, so a misread lower number is ignored."""
+        c = load_career() or {}
+        rows = []
+        for label, val in stats.items():
+            if label == "Monsters Killed" or not isinstance(val, (int, float)):
+                continue
+            if label in HEADLINE:
+                old = c.get("headline", {}).get(HEADLINE[label])
+            elif label in CAREER_OTHER or label == "Maxed-Out Hunters":
+                old = c.get("other", {}).get(label)
+            else:
+                continue  # weapon and hunter stats on a card have their own readers
+            if isinstance(val, int) and isinstance(old, int) and val < old:
+                continue
+            rows.append((label, val))
+        if rows:
+            old_c = json.loads(json.dumps(c))
+            if merge_stats(rows, picker=True):
+                new_c = load_career() or {}
+                note_deltas(new_c, old_c)
+                new_c["updated"] = dt.date.today().isoformat()
+                tmp = CAREER_PATH.with_suffix(".tmp")
+                tmp.write_text(json.dumps(new_c, indent=2), encoding="utf-8")
+                tmp.replace(CAREER_PATH)
+                self.changed_at = time.time()
 
     def _read(self, kind: str, data: dict, file: str) -> None:
         self.hist["reads"] = (self.hist["reads"] + [{"t": time.time(), "kind": kind, "file": file, **data}])[-20:]
@@ -1567,6 +1604,19 @@ class Tracker:
     def record_profile_stat(self, name: str, value) -> None:
         """A Player Profile card statistic (the hovered one in Profile > Statistic)."""
         c = load_career() or {}
+        if name.startswith(HUNTER_MOST) and isinstance(value, int):
+            # Your hunter with the most kills: the "<HUNTER> KILLS" row on the tracker. Matches after
+            # this add their kills on top until it's read again.
+            hunter = name[len(HUNTER_MOST):]
+            hk = c.setdefault("hunter_kills", {})
+            if hk.get(hunter, {}).get("n") != value:
+                hk[hunter] = {"n": value, "match": time.time()}
+                c.setdefault("profile_stats", {})["Hunter With Most Kills"] = value
+                tmp = CAREER_PATH.with_suffix(".tmp")
+                tmp.write_text(json.dumps(c, indent=2), encoding="utf-8")
+                tmp.replace(CAREER_PATH)
+                self.changed_at = time.time()
+            return
         if c.get("profile_stats", {}).get(name) == value:
             if merge_stats([(name, value)], picker=True):
                 self.changed_at = time.time()
@@ -3573,6 +3623,11 @@ def main() -> None:
     c = load_career()
     if c and c.get("profile_stats"):  # stats hovered in Profile > Statistic before they were shown
         merge_stats(list(c["profile_stats"].items()), picker=True, only_missing=True)
+    for r in reversed(t.hist.get("reads", [])):  # your squad-page column read before it was logged
+        mine = [p for p in r.get("players", []) if r["kind"] in ("lobby", "cards") and t._key(p["name"]) == t._me()]
+        if mine and t._me():
+            t.note_my_stats(mine[0].get("stats", {}))
+            break
     t.poll()
     if not args.svg:
         start_summary_capture(t)
