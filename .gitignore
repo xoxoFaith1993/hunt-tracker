@@ -1,0 +1,21 @@
+# Personal data and settings: stay on this PC only
+hunttracker.json
+hunttracker_history.json
+hunttracker_career.json
+hunttracker_*.json
+*.tmp
+*.log
+summaries/
+README.txt
+
+# Game artwork (belongs to Crytek): bundled in the installer, not published as source
+icons/
+backdrop.png
+
+# Build output
+__pycache__/
+installer/build/
+installer/dist/
+installer/Output/
+installer/*.spec
+installer/icon.ico

@@ -1,0 +1,37 @@
+HUNT TRACKER - TERMS OF USE
+
+Please read these terms before installing. By clicking "I accept the agreement"
+and installing Hunt Tracker, you agree to them.
+
+1. WHAT IT IS
+   Hunt Tracker is a free, unofficial companion window for Hunt: Showdown 1896.
+   It is not made, endorsed or supported by Crytek, Steam or Valve.
+
+2. WHAT IT DOES ON YOUR PC
+   - It reads Hunt's own log file (Game.log) to know when you are in a match.
+   - While Hunt is the active window, it takes screenshots of certain screens
+     (loading cards, death screens, post-match summary, Team Details, your
+     Statistics page and the map timer) and reads the text on them with
+     Windows' built-in text recognition.
+   - It checks whether the Tab key is held down during a hunt, to read the
+     map's timer.
+   - It saves what it reads (stats, player names, MMR stars, and some of the
+     screenshots) in your user folder: %LOCALAPPDATA%\HuntTracker
+   - It never changes, injects into, or reads the memory of the game, and it
+     does not send any data over the internet.
+
+3. OPTIONAL AUTO-START
+   If you choose it during setup, a small helper starts with Windows and
+   opens the tracker whenever Hunt starts. You can turn this off by
+   uninstalling, or by deleting "Hunt Tracker (opens with Hunt)" from your
+   Startup folder (Win+R, then type shell:startup).
+
+4. NO WARRANTY
+   Hunt Tracker is provided "as is", without any warranty. Numbers it shows
+   are read from the screen and may sometimes be wrong. Use it at your own
+   risk; the author is not responsible for any problems that come from
+   using it, including anything to do with your game account.
+
+5. UNINSTALLING
+   You can uninstall it any time from Windows Settings > Apps. You will be
+   asked whether to also delete your saved stats.
