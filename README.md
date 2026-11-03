@@ -26,13 +26,19 @@ click **More info → Run anyway**.
 
 - **Overlay**: press **End** in Hunt and the tracker comes up over the game: the game dims and the
   panels (Hunt Tracker, Hunt Log, Career, Player Summary) sit on top, with a bar of toggles across the
-  top. Drag a panel by its top strip and it stays there. **End**, **Esc** or a click on the dimmed game
+  top. Drag a panel anywhere and it stays there; click names, stats and headings like in the window. **End**, **Esc** or a click on the dimmed game
   takes you straight back. While it's open your clicks stay in the overlay and never reach the game.
 - **Overlay or window, your choice**: the **OVERLAY** button, or right-clicking the tracker's icon by
   the clock, switches between the overlay and a normal window for a second monitor. It remembers your
   pick; overlay is the default.
-- **Tray icon** by the clock (Overlay / Windowed / Open / Quit), and a short "Hunt Tracker is running"
-  note at the bottom of the screen when Hunt starts.
+- **Tray icon** by the clock (Overlay / Windowed / Overlay key / Open / Send diagnostics / Show artwork /
+  Quit), and a short "Hunt Tracker is running" note at the bottom of the screen when Hunt starts.
+  **Overlay key…** lets you pick another key (press it, then Enter); **Show artwork** switches the
+  picture behind the tracker's window on or off.
+- **Report an issue**: the button next to OVERLAY opens a box to describe a problem; it's sent to the
+  developer with the tracker's version and setup.
+- In the overlay, click a player for their card, a Hunt Log stat or Hunt Dollars for its graph (it opens
+  right over it), and the weapon family / type headings to pick which show, like in the window.
 - **Most kills in one hunt** has its own row.
 - **Prestige and rank** are read from your card on the lobby's squad page (the badges under your name).
 - **Diagnostics**: a report about once an hour helps find bugs (see [Your data](#your-data)); it asks once,

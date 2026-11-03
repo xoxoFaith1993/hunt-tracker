@@ -33,6 +33,21 @@
         "screens": { ".validate": "newData.isString() && newData.val().length <= 120000" },
         "$other": { ".validate": false }
       }
+    },
+    "issues": {
+      ".read": "auth != null && auth.uid === 'Xmb6G4ezSnZsKvmYBTKIucwwbzX2'",
+      "$uid": {
+        "$id": {
+          ".write": "auth != null && auth.uid === $uid && !data.exists()",
+          ".validate": "newData.hasChildren(['t', 'v', 'text'])",
+          "t": { ".validate": "newData.isNumber()" },
+          "v": { ".validate": "newData.isString() && newData.val().length <= 20" },
+          "name": { ".validate": "newData.isString() && newData.val().length <= 40" },
+          "text": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 3000" },
+          "setup": { "$k": { ".validate": "!newData.isString() || newData.val().length <= 200" } },
+          "$other": { ".validate": false }
+        }
+      }
     }
   }
 }

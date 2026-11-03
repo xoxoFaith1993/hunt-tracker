@@ -13,8 +13,9 @@ STARTING IT
 OVERLAY (the default)
 - Press End in Hunt: the game dims and the tracker's panels show on top. End, Esc or a click on the
   dimmed game goes back to Hunt. While it's open your clicks stay in the overlay, not the game.
-- Drag a panel by its top strip; it stays where you put it. The bar along the top shows or hides
-  panels, opens the Leaderboard, and OVERLAY switches to a normal window.
+- Drag a panel to move it; it stays where you put it. Click names, stats and headings like in the
+  window. The bar along the top shows or hides panels, opens the Leaderboard, REPORT AN ISSUE sends
+  a note to the developer, and OVERLAY switches to a normal window.
 - Prefer a window on a second monitor? Click OVERLAY (or right-click the icon > Windowed). It
   remembers your choice.
 

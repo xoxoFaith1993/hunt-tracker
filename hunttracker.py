@@ -337,7 +337,7 @@ def load_config() -> dict:
     if CONFIG_PATH.exists():
         try:
             cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
-            if cfg.get("overlay_key") in ("Alt+F", "Home"):  # earlier defaults (Hunt took Alt+F's F as "ready up")
+            if cfg.get("overlay_key") == "Alt+F":  # the first default: Hunt took Alt+F's F as "ready up"
                 cfg["overlay_key"] = "End"
         except (OSError, ValueError) as e:
             print(f"Couldn't read {CONFIG_PATH.name} ({e}); using defaults.")
@@ -2126,18 +2126,23 @@ def start_overlay_hotkey(t: "Tracker") -> None:
     It's only held while the OVERLAY button is on; off, the game gets the combo like any other keys.
     Each press bumps t.overlay_presses for the window."""
     t.overlay_presses = 0
-    hk = parse_hotkey(t.cfg.get("overlay_key", ""))
-    if os.name != "nt" or not hk:
+    if os.name != "nt":
         return
     import ctypes
     from ctypes import wintypes
 
     def run():
         u32 = ctypes.windll.user32
-        held, failed_for = False, None
+        held, failed_for, key = False, None, None
+        hk = None
         msg = wintypes.MSG()
         while True:
-            want = bool(t.cfg.get("overlay_mode"))
+            if t.cfg.get("overlay_key", "") != key:  # changed from the tray menu: let go of the old one
+                if held:
+                    u32.UnregisterHotKey(None, 1)
+                held, failed_for, key = False, None, t.cfg.get("overlay_key", "")
+                hk = parse_hotkey(key)
+            want = bool(t.cfg.get("overlay_mode")) and hk is not None
             if want and not held and failed_for is None:
                 if u32.RegisterHotKey(None, 1, hk[0] | 0x4000, hk[1]):  # 0x4000 = MOD_NOREPEAT
                     held = True
@@ -2201,7 +2206,7 @@ def start_tray(t: "Tracker") -> None:
                     ("guidItem", ctypes.c_byte * 16), ("hBalloonIcon", wintypes.HICON)]
 
     WM_TRAY = 0x8001
-    CHOICES = {1: "overlay", 2: "windowed", 3: "open", 4: "quit", 5: "diagnostics"}
+    CHOICES = {1: "overlay", 2: "windowed", 3: "open", 4: "quit", 5: "diagnostics", 6: "artwork", 7: "key"}
 
     def run():
         def proc(hwnd, msg, wp, lp):
@@ -2211,9 +2216,11 @@ def start_tray(t: "Tracker") -> None:
                     menu = u32.CreatePopupMenu()
                     u32.AppendMenuW(menu, 0x8 if on else 0, 1, "Overlay")  # 0x8 = MF_CHECKED
                     u32.AppendMenuW(menu, 0 if on else 0x8, 2, "Windowed")
+                    u32.AppendMenuW(menu, 0, 7, f"Overlay key: {t.cfg.get('overlay_key', 'End')}\u2026")
                     u32.AppendMenuW(menu, 0x800, 0, None)  # a separator
                     u32.AppendMenuW(menu, 0, 3, "Open")
                     u32.AppendMenuW(menu, 0x8 if t.cfg.get("diagnostics") else 0, 5, "Send diagnostics")
+                    u32.AppendMenuW(menu, 0x8 if t.cfg.get("backdrop", True) else 0, 6, "Show artwork")
                     u32.AppendMenuW(menu, 0x800, 0, None)
                     u32.AppendMenuW(menu, 0, 4, "Quit Hunt Tracker")
                     pt = wintypes.POINT()
@@ -4443,6 +4450,24 @@ def diag_report(t: "Tracker") -> dict:
             "screens": _tail(DATA / "screen_log.jsonl", 100000)}
 
 
+def send_issue(t: "Tracker", text: str) -> bool:
+    """REPORT AN ISSUE: the user's message, with the tracker's version and setup, kept for the
+    developer (only they can read it). With diagnostics on, a fresh diagnostics report goes too."""
+    if not LEADERBOARD_URL or not text.strip():
+        return False
+    try:
+        rep_ = diag_report(t)
+        tok = _lb_auth(t.cfg)
+        issue = {"t": rep_["t"], "v": VERSION, "name": rep_["name"], "text": text.strip()[:3000],
+                 "setup": rep_["setup"]}
+        _lb_request("POST", f"issues/{t.cfg['leaderboard_id']}", issue, tok)
+        if t.cfg.get("diagnostics"):
+            _lb_request("PUT", f"diagnostics/{t.cfg['leaderboard_id']}", rep_, tok)
+        return True
+    except Exception:  # noqa: BLE001 - offline or refused
+        return False
+
+
 def start_diagnostics(t: "Tracker") -> None:
     """Sends the diagnostics report (when it's switched on) two minutes after starting, then every hour
     if anything changed. Each copy only ever replaces its own report."""
@@ -4732,14 +4757,16 @@ def run_window(t: Tracker) -> None:
         key = (W, H, k, tuple(ops))
         if force or key != st["last"]:
             st["last"] = key
+            art = t.cfg.get("backdrop", True)  # the artwork behind the window (tray menu: Show artwork)
             boxes = tuple((round(o[1] * k), round(o[2] * k), round(o[3] * k), round(o[4] * k))
                           for o in ops if o[0] == "rect" and o[5] == C["panel"])
-            ops = [("rect", *o[1:5], "none", o[6] or C["inner"], o[7]) if o[0] == "rect" and o[5] == C["panel"]
-                   else o for o in ops]
+            if art:  # the boxes are drawn into the artwork instead, so it shows through them
+                ops = [("rect", *o[1:5], "none", o[6] or C["inner"], o[7]) if o[0] == "rect" and o[5] == C["panel"]
+                       else o for o in ops]
             draw_ops(canvas, W, H, ops, k)
             if st.get("graph"):
                 root.after_idle(place_graph)
-            if True:  # the backdrop picture is always shown
+            if art:
                 at = (0.5, 0.6)  # the hunter stays centred at every window size
                 bkey = (cw, ch, at, boxes)
                 if st.get("bd_key") != bkey:
@@ -4907,35 +4934,45 @@ def run_window(t: Tracker) -> None:
     canvas.bind("<Button-1>", on_click)
     root.bind("<Escape>", lambda e: close_graph() if st.get("graph") else close(e))
 
-    def graph_area(anchor=None):
+    def graph_area(anchor=None, cv_=None):
         """Where the graph pops out: over the Lifetime list, from its first row to its footnotes; the
-        Hunt Dollars graph over the Hunt Dollars / Blood Bonds box and the rows under it."""
-        cw, ch = canvas.winfo_width(), canvas.winfo_height()
-        money = [z for z in getattr(canvas, "hot", []) if z[4] == "dollars"]
+        Hunt Dollars graph over the Hunt Dollars / Blood Bonds box and the rows under it. cv_: another
+        canvas to measure (an overlay panel) instead of the window's."""
+        canvas_ = cv_ or canvas
+        cw, ch = canvas_.winfo_width(), canvas_.winfo_height()
+        money = [z for z in getattr(canvas_, "hot", []) if z[4] == "dollars"]
         if anchor == "dollars" and money:
             z = money[0]
             x0, y0 = z[0], z[1]
             x1 = min(cw, z[0] + 2 * (z[2] - z[0]))  # the whole Hunt Dollars | Blood Bonds row
             hgt = min(ch - y0 - 4, max(z[3] - z[1], (x1 - x0) * 0.62))
             return int(max(0, x0 - 4)), int(y0), int(x1 - x0 + 8), int(max(120, hgt))
-        zones = [z for z in getattr(canvas, "hot", []) if z[4] in STAT_GRAPHS and z[4] != "dollars"]
+        zones = [z for z in getattr(canvas_, "hot", []) if z[4] in STAT_GRAPHS and z[4] != "dollars"]
         if not zones:
             return None
         x0, x1 = min(z[0] for z in zones), max(z[2] for z in zones)
         y0, y1 = min(z[1] for z in zones), max(z[3] for z in zones)
         y1 += (y1 - y0) / len(zones) * 2  # the two footnote lines under the list
-        cw, ch = canvas.winfo_width(), canvas.winfo_height()
+        cw, ch = canvas_.winfo_width(), canvas_.winfo_height()
         x0, y0, x1, y1 = max(0, x0 - 4), max(0, y0 - 6), min(cw, x1 + 4), min(ch, y1)
         return int(x0), int(y0), int(x1 - x0), int(y1 - y0)
+
+    graph_hooks: list = []  # the overlay hides its graph window when the graph closes
 
     def close_graph():
         g = st.pop("graph", None)
         if g and g["frame"].winfo_exists():
             g["frame"].destroy()
+        if g:
+            for hook in graph_hooks:
+                hook()
 
     def place_graph():
         g = st.get("graph")
         if not g:
+            return
+        if g.get("parent") is not None:  # a window of its own (the overlay): fill it, unfolding downward
+            g["frame"].place(x=0, y=0, relwidth=1, relheight=max(0.01, g["unfold"]))
             return
         area = graph_area(g.get("anchor"))
         if not area:  # the Lifetime list isn't on screen any more (Career page, Detailed off)
@@ -4944,20 +4981,22 @@ def run_window(t: Tracker) -> None:
         x, y, w, h = area
         g["frame"].place(x=x, y=y, width=w, height=max(1, int(h * g["unfold"])))
 
-    def open_graph(key):
-        """One lifetime stat drawn day by day, popped out over the Lifetime list. Hover a day to read
-        its value; the arrows step through the other stats."""
+    def open_graph(key, parent=None):
+        """One lifetime stat drawn day by day, popped out over the Lifetime list (or filling `parent`,
+        a window of its own). Hover a day to read its value; the arrows step through the other stats."""
         g = st.get("graph")
         anchor = "dollars" if key == "dollars" else None  # where it opens; ◂ ▸ don't move it
-        if g:
+        if g and g.get("parent") is parent:
             g["key"], g["anchor"] = key, anchor
             place_graph()
             g["draw"]()
             return
-        frame = tk.Frame(canvas, bg=C["blood"])
+        if g:
+            close_graph()
+        frame = tk.Frame(parent or canvas, bg=C["blood"])
         cv = tk.Canvas(frame, bg=C["panel"], highlightthickness=0, bd=0)
         cv.pack(fill="both", expand=True, padx=1, pady=1)
-        g = {"key": key, "hover": None, "frame": frame, "unfold": 0.15, "anchor": anchor}
+        g = {"key": key, "hover": None, "frame": frame, "unfold": 0.15, "anchor": anchor, "parent": parent}
         st["graph"] = g
         keys = list(STAT_GRAPHS)
 
@@ -5130,7 +5169,9 @@ def run_window(t: Tracker) -> None:
     note.pack(side="right", fill="y")
 
     # ---- a player's whole record, over the window (click a name in Player Summary)
-    def open_player(name):
+    player_hooks: list = []  # the overlay hides its player window when the card closes
+
+    def open_player(name, parent=None):
         info = t.player_info(name)
         if not info:
             return
@@ -5138,7 +5179,7 @@ def run_window(t: Tracker) -> None:
         old = st.pop("player", None)
         if old is not None and old.winfo_exists():
             old.destroy()
-        frame = tk.Frame(canvas, bg=C["blood"])
+        frame = tk.Frame(parent or canvas, bg=C["blood"])
         cv = tk.Canvas(frame, bg=C["panel"], highlightthickness=0, bd=0)
         cv.pack(fill="both", expand=True, padx=1, pady=1)
         st["player"] = frame
@@ -5148,6 +5189,8 @@ def run_window(t: Tracker) -> None:
             if frame.winfo_exists():
                 frame.destroy()
             st.pop("player", None)
+            for hook in player_hooks:
+                hook()
 
         def draw(_e=None):
             cv.delete("all")
@@ -5229,6 +5272,160 @@ def run_window(t: Tracker) -> None:
     ov_btn.bind("<Button-1>", lambda e: set_mode(not t.cfg.get("overlay_mode")))
     ov_btn.bind("<Enter>", lambda e: paint_ov_btn(True))
     ov_btn.bind("<Leave>", lambda e: paint_ov_btn())
+
+    issue_btn = tk.Label(bar, bg="#0b0908", fg="#6f6456", font=(TEXT_FONT, 10, "bold"), padx=12, cursor="hand2",
+                         text="\u25c7 REPORT AN ISSUE")
+    issue_btn.pack(side="left", fill="y")
+    issue_btn.bind("<Button-1>", lambda e: report_issue())
+    issue_btn.bind("<Enter>", lambda e: issue_btn.configure(fg=C["brass"]))
+    issue_btn.bind("<Leave>", lambda e: issue_btn.configure(fg="#6f6456"))
+
+    KEY_NAMES = {"Prior": "PageUp", "Next": "PageDown", "Scroll_Lock": "ScrollLock", "Insert": "Insert",
+                 "Delete": "Delete", "Home": "Home", "End": "End", "Pause": "Pause"}
+
+    def change_key():
+        """Pick the key (or Ctrl / Alt / Shift + key) that opens the overlay: press it, then Save."""
+        if st.get("key_win") is not None and st["key_win"].winfo_exists():
+            st["key_win"].lift()
+            return
+        win = tk.Toplevel(root, bg=C["blood"])
+        st["key_win"] = win
+        win.title("Hunt Tracker - Overlay key")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        body = tk.Frame(win, bg=C["panel"], padx=22, pady=18)
+        body.pack(fill="both", expand=True, padx=1, pady=1)
+        tk.Label(body, text="OVERLAY KEY", bg=C["panel"], fg=C["brass"], font=(TEXT_FONT, 13, "bold")).pack(anchor="w")
+        tk.Label(body, text="Press the key (or Ctrl / Alt / Shift + a key) that should open the overlay, then "
+                            "Enter or Save.\n\n"
+                            "Hunt still sees every key you press, so pick one Hunt doesn't use: End, Home, Insert, "
+                            "Page Up or Page Down are safe.", bg=C["panel"], fg=C["cream"], font=(TEXT_FONT, 11),
+                 justify="left", wraplength=480).pack(anchor="w", pady=(8, 12))
+        chosen = {"key": t.cfg.get("overlay_key", "End")}
+        shown = tk.Label(body, text=chosen["key"], bg="#0b0908", fg=C["gold"], font=(NUM_FONT, 18, "bold"),
+                         padx=18, pady=8)
+        shown.pack(anchor="w")
+        note = tk.Label(body, text="", bg=C["panel"], fg=C["dim"], font=(TEXT_FONT, 9))
+        note.pack(anchor="w", pady=(6, 10))
+
+        def on_key(e):
+            ks = e.keysym
+            if ks in ("Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", "Escape", "Return"):
+                return
+            if ks in KEY_NAMES:
+                name = KEY_NAMES[ks]
+            elif re.fullmatch(r"F\d{1,2}", ks):
+                name = ks
+            elif re.fullmatch(r"KP_\d", ks):
+                name = "Num" + ks[3:]
+            elif len(ks) == 1 and ks.isalnum():
+                name = ks.upper()
+            else:
+                note.configure(text=f"{ks} can't be used: try another key.", fg=C["red"])
+                return
+            mods = [m for m, bit in (("Ctrl", 0x4), ("Alt", 0x20000), ("Shift", 0x1)) if e.state & bit]
+            combo = "+".join(mods + [name])
+            if parse_hotkey(combo) is None:
+                note.configure(text=f"{combo} can't be used: try another key.", fg=C["red"])
+                return
+            chosen["key"] = combo
+            shown.configure(text=combo)
+            note.configure(text="", fg=C["dim"])
+
+        def save():
+            t.cfg["overlay_key"] = chosen["key"]
+            save_cfg()
+            paint_ov_btn()
+            if ov.get("built"):
+                paint_ov_bar()
+                ov["hint"].configure(text=f"{chosen['key']} or Esc: back to Hunt   \u00b7   drag a panel to move it")
+            win.destroy()
+
+        row = tk.Frame(body, bg=C["panel"])
+        row.pack(anchor="e")
+        for label, cmd, strong in (("Cancel", win.destroy, False), ("Save", save, True)):
+            b_ = tk.Label(row, text=label, bg="#0b0908", fg=C["brass"] if strong else C["dim"], cursor="hand2",
+                          font=(TEXT_FONT, 11, "bold"), padx=16, pady=6)
+            b_.pack(side="left", padx=(8, 0))
+            b_.bind("<Button-1>", lambda _e, c_=cmd: c_())
+        win.bind("<KeyPress>", on_key)
+        win.bind("<Return>", lambda _e: save())  # Enter saves (it can't be the overlay key itself)
+        win.bind("<Escape>", lambda _e: win.destroy())
+        win.update_idletasks()
+        from ctypes import wintypes
+        cur = wintypes.POINT()
+        u32.GetCursorPos(ctypes.byref(cur))
+        ml, mt, mr, mb = monitor_at(cur.x, cur.y)  # where the tray menu was just used
+        win.geometry(f"+{ml + (mr - ml - win.winfo_reqwidth()) // 2}+{mt + (mb - mt - win.winfo_reqheight()) // 3}")
+        win.after(50, lambda: (focus(hwnd_of(win)), win.focus_force()))
+
+    def report_issue():
+        """A box to describe a problem; Send hands it to the developer (with the setup, and a fresh
+        diagnostics report when those are on)."""
+        if st.get("issue_win") is not None and st["issue_win"].winfo_exists():
+            st["issue_win"].lift()
+            return
+        win = tk.Toplevel(root, bg=C["blood"])
+        st["issue_win"] = win
+        win.title("Hunt Tracker - Report an issue")
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        body = tk.Frame(win, bg=C["panel"], padx=22, pady=18)
+        body.pack(fill="both", expand=True, padx=1, pady=1)
+        tk.Label(body, text="REPORT AN ISSUE", bg=C["panel"], fg=C["brass"], font=(TEXT_FONT, 13, "bold")).pack(anchor="w")
+        tk.Label(body, text="What went wrong? What were you doing, and what did you expect to see?",
+                 bg=C["panel"], fg=C["cream"], font=(TEXT_FONT, 11), justify="left", wraplength=520).pack(anchor="w", pady=(8, 8))
+        box = tk.Text(body, width=62, height=8, wrap="word", bg="#0b0908", fg=C["cream"], insertbackground=C["cream"],
+                      relief="flat", font=(TEXT_FONT, 11), padx=8, pady=6, highlightthickness=1,
+                      highlightbackground=C["inner"], highlightcolor=C["brass"])
+        box.pack(fill="x")
+        what = ("your tracker's version and setup, and a diagnostics report" if t.cfg.get("diagnostics")
+                else "your tracker's version and setup")
+        note = tk.Label(body, text=f"Sent to the developer with {what}.", bg=C["panel"], fg=C["dim"],
+                        font=(TEXT_FONT, 9), justify="left", wraplength=520)
+        note.pack(anchor="w", pady=(6, 12))
+        row = tk.Frame(body, bg=C["panel"])
+        row.pack(anchor="e")
+
+        def button(label, cmd, strong):
+            b_ = tk.Label(row, text=label, bg="#0b0908", fg=C["brass"] if strong else C["dim"], cursor="hand2",
+                          font=(TEXT_FONT, 11, "bold"), padx=16, pady=6)
+            b_.pack(side="left", padx=(8, 0))
+            b_.bind("<Button-1>", lambda _e: cmd())
+            return b_
+
+        def send():
+            text_ = box.get("1.0", "end").strip()
+            if not text_:
+                note.configure(text="Type what happened first.", fg=C["red"])
+                return
+            note.configure(text="Sending...", fg=C["dim"])
+            send_b.unbind("<Button-1>")
+
+            def work():
+                ok = send_issue(t, text_)
+                root.after(0, lambda: done(ok))
+            threading.Thread(target=work, daemon=True).start()
+
+        def done(ok):
+            if not win.winfo_exists():
+                return
+            if ok:
+                note.configure(text="Sent, thanks! It'll be looked at.", fg=C["green"])
+                win.after(1800, win.destroy)
+            else:
+                note.configure(text="Couldn't send it (no internet?). Try again in a moment.", fg=C["red"])
+                send_b.bind("<Button-1>", lambda _e: send())
+
+        button("Cancel", win.destroy, False)
+        send_b = button("Send", send, True)
+        win.bind("<Escape>", lambda _e: win.destroy())
+        win.update_idletasks()
+        if ov.get("open"):  # over the overlay: above its dim layer
+            own(win, hwnd_of(ov["dim"]))
+        _hw, (l, tp, r, b) = hunt_monitor() if ov.get("open") else (None, monitor_at(root.winfo_rootx(), root.winfo_rooty()))
+        win.geometry(f"+{l + (r - l - win.winfo_reqwidth()) // 2}+{tp + (b - tp - win.winfo_reqheight()) // 3}")
+        win.after(50, lambda: (focus(hwnd_of(win)), win.focus_force(), box.focus_set()))
 
     def lb_set_share(on: bool):
         t.cfg["leaderboard_opt_in"] = on
@@ -5494,8 +5691,10 @@ def run_window(t: Tracker) -> None:
         u32.WindowFromPoint.argtypes = [wintypes.POINT]
         u32.WindowFromPoint.restype = ctypes.c_void_p
         hw = u32.WindowFromPoint(wintypes.POINT(x, y))
-        todo = [w_ for w_ in [ov.get("dim"), ov.get("bar"), ov.get("lbwin")] + [p_["win"] for p_ in ov["panels"].values()]
-                if w_ is not None]
+        todo = [w_ for w_ in [ov.get("dim"), ov.get("bar"), ov.get("lbwin"), ov.get("plwin"), ov.get("grwin"),
+                              st.get("issue_win"), st.get("fam_pop")]
+                + [p_["win"] for p_ in ov["panels"].values()]
+                if w_ is not None and w_.winfo_exists()]
         while todo:
             w_ = todo.pop()
             if w_.winfo_id() == hw:
@@ -5594,7 +5793,7 @@ def run_window(t: Tracker) -> None:
         bar_ = new_win(BAR_BG)
         tk.Frame(bar_, bg=C["blood"], height=1).pack(side="bottom", fill="x")
         btns = {}
-        for label, key in BAR_TOGGLES + [("LEADERBOARD", "lb"), ("OVERLAY", "mode")]:
+        for label, key in BAR_TOGGLES + [("LEADERBOARD", "lb"), ("OVERLAY", "mode"), ("REPORT AN ISSUE", "issue")]:
             b_ = tk.Label(bar_, bg=BAR_BG, font=font(10), padx=12, cursor="hand2")
             b_.pack(side="left", fill="y")
             b_.bind("<Button-1>", lambda _e, k_=key: bar_click(k_))
@@ -5602,19 +5801,22 @@ def run_window(t: Tracker) -> None:
             b_.bind("<Leave>", lambda _e: paint_ov_bar())
             btns[key] = (label, b_)
         tk.Label(bar_, bg=BAR_BG, fg=DIM_TEXT, font=font(9, False), padx=12, text=f"v{VERSION}").pack(side="right", fill="y")
-        tk.Label(bar_, bg=BAR_BG, fg=DIM_TEXT, font=font(9, False), padx=12,
-                 text=f"{t.cfg.get('overlay_key', 'End')} or Esc: back to Hunt   \u00b7   "
-                      "drag a panel by its top strip").pack(side="right", fill="y")
+        hint = tk.Label(bar_, bg=BAR_BG, fg=DIM_TEXT, font=font(9, False), padx=12,
+                        text=f"{t.cfg.get('overlay_key', 'End')} or Esc: back to Hunt   \u00b7   "
+                             "drag a panel to move it")
+        hint.pack(side="right", fill="y")
         lbwin = new_win(C["blood"])
+        plwin = new_win(C["blood"])
+        grwin = new_win(C["blood"])
         toast = toast_win()
-        ov.update(dim=dim, bar=bar_, btns=btns, lbwin=lbwin, toast=toast)
+        ov.update(dim=dim, bar=bar_, btns=btns, lbwin=lbwin, plwin=plwin, grwin=grwin, toast=toast, hint=hint)
         for key, title, _b in OVERLAY_PANELS:
             panel_win(key, title)
         root.update_idletasks()
-        for w_ in [dim, bar_, lbwin, toast] + [p_["win"] for p_ in ov["panels"].values()]:
+        for w_ in [dim, bar_, lbwin, plwin, grwin, toast] + [p_["win"] for p_ in ov["panels"].values()]:
             show(w_, False)
         dim.attributes("-alpha", float(t.cfg.get("overlay_dim", 0.55)))
-        for w_ in [bar_, lbwin] + [p_["win"] for p_ in ov["panels"].values()]:
+        for w_ in [bar_, lbwin, plwin, grwin] + [p_["win"] for p_ in ov["panels"].values()]:
             w_.attributes("-alpha", 1.0)
             own(w_, hwnd_of(dim))
         click_through(toast)
@@ -5684,17 +5886,12 @@ def run_window(t: Tracker) -> None:
         fade()
 
     def panel_win(key, title):
+        """A panel: drag it anywhere to move it; a click that doesn't move acts like in the window."""
         w_ = new_win(C["blood"])
-        strip = tk.Frame(w_, bg=BAR_BG)
-        grip = tk.Label(strip, bg=BAR_BG, fg=DIM_TEXT, font=font(9), padx=10, pady=2, cursor="fleur",
-                        text="\u2237  " + title)
-        grip.pack(side="left", fill="y")
         cv = tk.Canvas(w_, bg=C["bg"], highlightthickness=0, bd=0, cursor="fleur")
-        for wd in (strip, grip, cv):
-            wd.bind("<ButtonPress-1>", lambda e, k_=key: drag(e, k_, "start"))
-            wd.bind("<B1-Motion>", lambda e, k_=key: drag(e, k_, "move"))
-            wd.bind("<ButtonRelease-1>", lambda e, k_=key: drag(e, k_, "end"))
-        strip.pack(side="top", fill="x")
+        cv.bind("<ButtonPress-1>", lambda e, k_=key: drag(e, k_, "start"))
+        cv.bind("<B1-Motion>", lambda e, k_=key: drag(e, k_, "move"))
+        cv.bind("<ButtonRelease-1>", lambda e, k_=key: drag(e, k_, "end"))
         cv.pack(side="top")
         ov["panels"][key] = {"win": w_, "cv": cv, "shown": False}
 
@@ -5706,6 +5903,8 @@ def run_window(t: Tracker) -> None:
         for key, (label, b_) in ov["btns"].items():
             if key == "mode":
                 on, label = True, f"OVERLAY ({t.cfg.get('overlay_key', 'End')})"
+            elif key == "issue":
+                on = False
             elif key == "lb":
                 on = lb_here
             else:
@@ -5716,6 +5915,10 @@ def run_window(t: Tracker) -> None:
     def bar_click(key):
         if key == "mode":  # back to a normal window
             set_mode(False)
+            return
+        if key == "issue":  # the box opens over Hunt with the overlay closed (it's typed into)
+            ov_close(refocus=False, why="report an issue")
+            report_issue()
             return
         if key == "lb":
             lb_overlay()
@@ -5733,10 +5936,73 @@ def run_window(t: Tracker) -> None:
         l, tp, r, b = ov["mon"]
         w_, h_ = min(r - l - 80, int(620 * scale())), int((b - tp) * 0.78)
         lw = ov["lbwin"]
-        lw.geometry(f"{w_}x{h_}")
-        put(lw, l + (r - l - w_) // 2, tp + (b - tp - h_) // 2)
-        show(lw, True, activate=True)
+        place_shown(lw, l + (r - l - w_) // 2, tp + (b - tp - h_) // 2, w_, h_)
         lb_open(parent=lw)
+
+    def player_overlay(name):
+        """A player's whole record, in a window of its own in the middle of the overlay."""
+        l, tp, r, b = ov["mon"]
+        w_, h_ = min(r - l - 80, int(800 * scale())), min(b - tp - 80, int(500 * scale()))
+        place_shown(ov["plwin"], l + (r - l - w_) // 2, tp + (b - tp - h_) // 2, w_, h_)
+        open_player(name, parent=ov["plwin"])
+
+    def place_shown(w_, x, y, wd, ht):
+        """Show an overlay window, then size and move it (moved while hidden, Tk puts it back top-left)."""
+        show(w_, True, activate=True)
+        w_.geometry(f"{wd}x{ht}+{x}+{y}")
+        w_.update_idletasks()
+        put(w_, x, y)
+
+    def graph_overlay(key, cv_=None):
+        """A stat's day-by-day graph (or Hunt Dollars'), in a window of its own over what was clicked:
+        the Lifetime list, or the Hunt Dollars box, like in the window."""
+        l, tp, r, b = ov["mon"]
+        area = graph_area("dollars" if key == "dollars" else None, cv_) if cv_ is not None else None
+        if area:
+            x, y, wd, ht = area
+            x, y = cv_.winfo_rootx() + x, cv_.winfo_rooty() + y
+            wd, ht = max(wd, int(360 * scale())), max(ht, int(200 * scale()))
+        else:
+            wd, ht = min(r - l - 80, int(720 * scale())), min(b - tp - 80, int(400 * scale()))
+            x, y = l + (r - l - wd) // 2, tp + (b - tp - ht) // 2
+        x, y = max(l, min(x, r - wd)), max(tp, min(y, b - ht))
+        place_shown(ov["grwin"], x, y, wd, ht)
+        open_graph(key, parent=ov["grwin"])
+
+    def graph_hidden():
+        if ov.get("built"):
+            show(ov["grwin"], False)
+    graph_hooks.append(graph_hidden)
+
+    def overlay_click(w_, x, y, x_root, y_root):
+        """A click (not a drag) on an overlay panel: what the same click does in the window."""
+        tags = set()
+        for item in w_.find_overlapping(x - 2, y - 2, x + 2, y + 2):
+            tags.update(w_.gettags(item))
+        if {"famhead", "typehead"} & tags:  # pick which weapon families / types show
+            ev = type("Ev", (), {"x_root": x_root, "y_root": y_root})()
+            families_menu(ev, "types" if "typehead" in tags else "families")
+            pop = st.get("fam_pop")
+            if pop is not None and pop.winfo_exists():
+                own(pop, hwnd_of(ov["dim"]))
+                pop.update_idletasks()
+                ml, mt, mr, mb = monitor_at(x_root, y_root)  # by the click, inside its monitor
+                put(pop, max(ml + 8, min(x_root, mr - pop.winfo_reqwidth() - 8)),
+                    max(mt + 8, min(y_root + 12, mb - pop.winfo_reqheight() - 8)))
+                pop.after(30, lambda: (focus(hwnd_of(pop)), pop.focus_force()))
+            return
+        hit = next((z[4] for z in getattr(w_, "hot", []) if z[0] <= x <= z[2] and z[1] <= y <= z[3]), None)
+        if not hit:
+            return
+        if hit.startswith("player:"):
+            player_overlay(hit[len("player:"):])
+        elif hit in STAT_GRAPHS:
+            graph_overlay(hit, w_)
+
+    def player_hidden():
+        if ov.get("built"):
+            show(ov["plwin"], False)
+    player_hooks.append(player_hidden)
 
     def lb_hidden():
         if ov.get("built"):
@@ -5745,7 +6011,20 @@ def run_window(t: Tracker) -> None:
     lb_hooks.append(lb_hidden)
 
     def on_esc(_e=None):
-        if st.get("lb") is not None and st["lb"].winfo_exists() and st["lb"].master is ov.get("lbwin"):
+        pop = st.get("fam_pop")
+        if pop is not None and pop.winfo_exists():
+            close_families()
+            return
+        g = st.get("graph")
+        if g and g.get("parent") is ov.get("grwin"):
+            close_graph()
+            return
+        pl = st.get("player")
+        if pl is not None and pl.winfo_exists() and pl.master is ov.get("plwin"):
+            pl.destroy()
+            st.pop("player", None)
+            player_hidden()
+        elif st.get("lb") is not None and st["lb"].winfo_exists() and st["lb"].master is ov.get("lbwin"):
             lb_close()
         else:
             ov_close(why="Esc")
@@ -5803,6 +6082,8 @@ def run_window(t: Tracker) -> None:
         p_ = ov["panels"][key]
         l, tp, r, b = ov["mon"]
         if step == "start":
+            ov["press"] = (e.widget, e.x, e.y, e.x_root, e.y_root)
+            ov["drag_to"] = None
             ov["drag"] = (e.x_root, e.y_root, *spot(key))
             u32.SetWindowPos(hwnd_of(p_["win"]), 0, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)  # above the others
         elif step == "move" and ov["drag"]:
@@ -5813,6 +6094,12 @@ def run_window(t: Tracker) -> None:
             p_["win"].geometry(f"+{l + nx}+{tp + ny}")
         elif step == "end" and ov["drag"]:
             ov["drag"] = None
+            pw_, px_, py_, rx_, ry_ = ov.get("press") or (None, 0, 0, 0, 0)
+            if abs(e.x_root - rx_) + abs(e.y_root - ry_) < 6:  # a click, not a drag
+                ov["drag_to"] = None
+                if pw_ is not None and pw_.winfo_class() == "Canvas":
+                    overlay_click(pw_, px_, py_, rx_, ry_)
+                return
             if ov.get("drag_to"):
                 t.cfg.setdefault("overlay_panels", {})[key] = list(ov.pop("drag_to"))
                 save_cfg()
@@ -5855,6 +6142,15 @@ def run_window(t: Tracker) -> None:
         shield.switch(False)
         if st.get("lb") is not None and st["lb"].winfo_exists() and st["lb"].master is ov["lbwin"]:
             lb_close()
+        pl = st.get("player")
+        if pl is not None and pl.winfo_exists() and pl.master is ov["plwin"]:
+            pl.destroy()
+            st.pop("player", None)
+        show(ov["plwin"], False)
+        g = st.get("graph")
+        if g and g.get("parent") is ov["grwin"]:
+            close_graph()
+        close_families()
         for w_ in (ov["bar"], ov["dim"]):
             show(w_, False)
         ov_refresh()
@@ -5911,6 +6207,12 @@ def run_window(t: Tracker) -> None:
             elif cmd == "diagnostics":
                 t.cfg["diagnostics"] = not t.cfg.get("diagnostics")
                 save_cfg()
+            elif cmd == "key":
+                change_key()
+            elif cmd == "artwork":  # the picture behind the tracker's window
+                t.cfg["backdrop"] = not t.cfg.get("backdrop", True)
+                save_cfg()
+                redraw(force=True)
         root.after(100, check_overlay)
 
     start_tray(t)
