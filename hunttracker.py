@@ -31,7 +31,7 @@ from xml.sax.saxutils import escape
 
 FROZEN = getattr(sys, "frozen", False)  # the installed .exe
 # "Publish Update.bat" bumps this and uploads the build; installed copies update themselves to it.
-VERSION = "1.0.10"
+VERSION = "1.0.11"
 UPDATE_REPO = "xoxoFaith1993/hunt-tracker"
 # A one-file .exe unpacks to a temp folder that __file__ points into; the install folder is the exe's.
 HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
@@ -49,7 +49,7 @@ DEFAULTS = {
     "host": "127.0.0.1",     # "0.0.0.0" lets a phone/tablet on your Wi-Fi open it (no password!)
     "poll_seconds": 2,
     "window_scale": 1.0,      # old fixed scale; the window now just scales to its size
-    "always_on_top": False,   # keep the window above other windows (ON TOP at the top)
+    "always_on_top": False,   # (no longer shown: the tracker lives on a second monitor)
     "detailed": True,         # detailed stats view (DETAILED at the top)
     "min_hunt_seconds": 120,  # ignore "hunts" shorter than this (e.g. instant disconnects)
     "quick_leave_seconds": 300,
@@ -63,6 +63,12 @@ DEFAULTS = {
     "save_summary_screens": True,
     # Reads your stats (Windows' built-in OCR) whenever the menu's Statistics / weapon stats page is open.
     "read_stats_page": True,
+    # New screens are kept as text (screen_log.jsonl); true also saves the images in "summaries".
+    "keep_screenshots": False,
+    # Leaderboard: None = not asked yet, True = your Career stats are shared, False = not shared.
+    "leaderboard_opt_in": None,
+    "leaderboard_id": "",
+    "leaderboard_refresh": "",
 }
 SUMMARY_DIR = DATA / "summaries"
 CAREER_PATH = DATA / "hunttracker_career.json"
@@ -114,6 +120,38 @@ def known_kills(c: dict, extra: int = 0):
     else:
         src = "weapon families"
     return max(by_type, by_family) + extra, src, extra
+
+
+def read_lobby_hunter(words: list, w: int, h: int):
+    """The hunter you've picked, from the lobby: centred near the bottom, "Desert Rose: Dust Devil  50 / 50"
+    (name: skin, then the bloodline numbers). -> (hunter, full name with skin) or None."""
+    for ln in ocr_lines([q for q in words if q[1] > h * 0.8 and w * 0.25 < q[0] < w * 0.75]):
+        txt = " ".join(q[4] for q in ln)
+        full = re.split(r"\s*[\d/@+]", txt, maxsplit=1)[0].strip(" .:")
+        if not re.search("[A-Za-z]{3}", full) or re.search(r"invite|player|ready|search|cancel", full, re.I):
+            continue
+        hunter = re.split(r"[:.]", full, maxsplit=1)[0].strip()
+        if re.fullmatch(r"[A-Za-z][A-Za-z '\-]{2,}", hunter) and not looks_like_weapon(hunter):
+            return hunter, full
+    return None
+
+
+def read_summary_hunter(words: list):
+    """The hunter you played, from the summary's "Hunter Progress" block: the line under it reads
+    "Desert Rose: Dust Devil  31  +10445" -> "Desert Rose" (the skin after ":" is dropped)."""
+    lines = [" ".join(q[4] for q in ln) for ln in ocr_lines(words)]
+    for i, txt in enumerate(lines):
+        if re.search(r"hunter\s*progress", txt, re.I) and i + 1 < len(lines):
+            # OCR reads the ":" before the skin as "." at times, and the level icon as "@".
+            name = re.split(r"[:.@+\d]", lines[i + 1], maxsplit=1)[0].strip()
+            words = name.split()
+            while words and len(words[-1]) <= 2:  # icon junk after the name ("Lilith g o")
+                words.pop()
+            name = " ".join(words)
+            if re.search(r"progress|summary|bloodline|mission|bounty|killed", name, re.I):
+                return None  # another heading, not a hunter
+            return name if re.fullmatch(r"[A-Za-z][A-Za-z '\-]{2,}", name) else None
+    return None
 
 
 HUNTER_KILLS = re.compile(r"hunters?\s*killed\s*\+\s*(\d+)", re.I)
@@ -623,8 +661,86 @@ def _ocr_server(png: Path):
         return None
 
 
+_wocr: dict = {}
+
+
+def _winrt_ocr():
+    """Windows' OCR engine called straight from Python (the winrt packages), or None without them."""
+    if "eng" not in _wocr:
+        try:
+            from winrt.windows.media.ocr import OcrEngine
+            _wocr["eng"] = OcrEngine.try_create_from_user_profile_languages()
+        except Exception:  # noqa: BLE001 - not installed: the PowerShell way still works
+            _wocr["eng"] = None
+    return _wocr["eng"]
+
+
+def _ocr_result_words(res) -> list:
+    return [(int(wd.bounding_rect.x), int(wd.bounding_rect.y), int(wd.bounding_rect.width),
+             int(wd.bounding_rect.height), wd.text) for ln in res.lines for wd in ln.words]
+
+
+def ocr_pixels(w: int, h: int, bgra: bytes):
+    """OCR a screenshot straight from memory: no image file, no PowerShell. None if unavailable."""
+    eng = _winrt_ocr()
+    if eng is None:
+        return None
+    import asyncio
+    try:
+        from winrt.windows.graphics.imaging import BitmapAlphaMode, BitmapPixelFormat, SoftwareBitmap
+        from winrt.windows.storage.streams import Buffer
+        buf = Buffer(len(bgra))
+        buf.length = len(bgra)
+        memoryview(buf)[:] = bgra
+        bmp = SoftwareBitmap.create_copy_from_buffer(buf, BitmapPixelFormat.BGRA8, w, h,
+                                                     BitmapAlphaMode.PREMULTIPLIED)
+
+        async def go():
+            return await eng.recognize_async(bmp)
+        with _ocr["lock"]:
+            return _ocr_result_words(asyncio.run(go()))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _ocr_file_winrt(png: Path):
+    eng = _winrt_ocr()
+    if eng is None:
+        return None
+    import asyncio
+    try:
+        from winrt.windows.graphics.imaging import BitmapDecoder
+        from winrt.windows.storage import FileAccessMode, StorageFile
+
+        async def go():
+            f = await StorageFile.get_file_from_path_async(str(Path(png).resolve()))
+            stream = await f.open_async(FileAccessMode.READ)
+            bmp = await (await BitmapDecoder.create_async(stream)).get_software_bitmap_async()
+            res = await eng.recognize_async(bmp)
+            stream.close()
+            return res
+        with _ocr["lock"]:
+            return _ocr_result_words(asyncio.run(go()))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def ocr_frame(w: int, h: int, bgra: bytes) -> list:
+    """OCR a grabbed frame: from memory when possible, else through a temporary PNG."""
+    words = ocr_pixels(w, h, bgra)
+    if words is None:
+        import tempfile
+        tmp = Path(tempfile.gettempdir()) / "hunttracker_frame.png"
+        write_png(tmp, w, h, bgra)
+        words = ocr_words(tmp)
+    return words
+
+
 def ocr_words(png: Path) -> list:
     """Windows' built-in OCR (Windows 10/11) -> [(x, y, w, h, text)]."""
+    words = _ocr_file_winrt(png)
+    if words is not None:
+        return words
     import tempfile
     # The running OCR process can keep an image file open for a while, which would block the next
     # write to it; so it gets its own copy each time, and old copies are cleared out as they free up.
@@ -698,6 +814,14 @@ HEADLINE = {"Kills/Deaths": "K/D", "KDA Ratio": "KDA", "Kills/Deaths/Assists": "
             "Players Killed": "Players Killed", "Killed by Player": "Killed by Player",
             "Kill Assists": "Kill Assists"}
 KD_TOOLTIP = re.compile(r"(Players Killed|Killed by Player|Kill Assists)\s*:\s*([\d,]+)", re.I)
+
+
+def looks_like_weapon(name: str, known=()) -> bool:
+    """A weapon type or family, even misread by OCR ("Serni-Aut01natic" is Semi-Automatic)."""
+    import difflib
+    k = player_key(name)
+    pool = [player_key(w) for w in list(CAREER_TYPES) + list(FAMILY_CLASS) + list(known) + ["Carbine", "Crossbow"]]
+    return family_of(name) is not None or any(difflib.SequenceMatcher(None, k, w).ratio() >= 0.75 for w in pool)
 
 
 HUNTER_MOST = "Hunter With Most Kills: "  # + the hunter's name, as read_profile_stat returns it
@@ -1026,7 +1150,30 @@ def trim_name(seg: list) -> str:
     return _clean(" ".join(q[4] for q in seg))
 
 
-DEATH_SKIP = re.compile(r"hide|show|revive|profile|player names|spectate|back to menu", re.I)
+DEATH_SKIP = re.compile(r"hide|show|revive|profile|player names|spectate|back to menu|damage|healing|"
+                        r"outbound|inbound|animals", re.I)
+# Menu text and player-card titles that sit where a name is read; never a player.
+NOT_PLAYERS = {"achievements", "bound by blood", "statistics", "steam settings", "searching", "game", "earned",
+               "push-to-talk", "push-to-mute", "settings", "loading", "ready", "invite", "new recruit",
+               "seasoned hunter", "the prestigious", "meathead master", "outlaw", "butcher's bully", "mutant scum"}
+
+
+def not_a_player(name: str) -> bool:
+    """Menu text, a card title or a stat ("Lilith Kills") read as a name."""
+    n = re.sub(r"\s+", " ", name or "").strip().lower()
+    return (n in NOT_PLAYERS or n.startswith("push-") or n.startswith("game re")
+            or re.fullmatch(r"\w+ kills?", n) is not None)
+
+
+def number_plate(name: str) -> bool:
+    """The prestige / rank plate under a death screen's name read as text: "65 010b", "V 36 0100"."""
+    return len(re.findall("[A-Za-z]", name)) <= 2 and len(re.findall(r"\d", name)) >= 2
+
+
+def strip_kill_count(name: str) -> str:
+    """The death screen's name plate can start with a count read as part of the name: "2 Maester",
+    "4) Rinzler", "S Huckleberry McRib" (5 read as S)."""
+    return re.sub(r"^(?:\d\)?|[S5]\)?|\(D >)\s+(?=\S{3})", "", name).strip()
 
 
 def _clean(txt: str) -> str:
@@ -1053,9 +1200,9 @@ def read_death(words: list, width: int, height: int) -> dict:
     for ws in right:
         if not height * 0.72 <= ws[0][1] <= height * 0.82:
             continue
-        name = trim_name(ws)
+        name = strip_kill_count(trim_name(ws))
         if len(re.sub("[^0-9A-Za-z]", "", name)) >= 2 and not DEATH_SKIP.search(name) and len(name) <= 32 \
-                and re.search("[A-Za-z]", name):
+                and re.search("[A-Za-z]", name) and not not_a_player(name) and not number_plate(name):
             killer = name
     left = [_clean(" ".join(q[4] for q in ws)) for ws in ocr_lines([w for w in words if w[0] < width * 0.4])]
     for i, txt in enumerate(left):
@@ -1067,6 +1214,19 @@ def read_death(words: list, width: int, height: int) -> dict:
                 parts.append(nxt)
             weapon = " ".join(parts) or None
             break
+    # Killed by a monster (or fire, poison...): "Killed by" sits on the left with its name under it,
+    # there's no player name plate, and the monster's card is top right.
+    ai = None
+    for i, txt in enumerate(left):
+        if re.fullmatch(r"killed\s*by\s*:?", txt, re.I) and i + 1 < len(left):
+            nm = left[i + 1]
+            if nm and len(nm) <= 30 and re.search("[A-Za-z]{3}", nm) and not re.search(r"distance|mission", nm, re.I):
+                ai = nm
+            break
+    if ai and not weapon:
+        killer = None  # anything read in the name-plate spot is a voice-chat bubble, not a killer
+    else:
+        ai = None
     dist = None
     for i, txt in enumerate(lines):  # "Distance to killer:" with the "8m" on the same line or just under it
         if re.search(r"distance\s*to\s*killer", txt, re.I):
@@ -1076,7 +1236,7 @@ def read_death(words: list, width: int, height: int) -> dict:
                     dist = int(m.group(1))
                     break
             break
-    return {"killer": killer, "hunter": hunter, "weapon": weapon, "dist": dist, "lines": lines}
+    return {"killer": killer, "hunter": hunter, "weapon": weapon, "dist": dist, "ai": ai, "lines": lines}
 
 
 MISSION_LEFT = re.compile(r"ends\s*in\s*:?\s*(\d{1,2})\s*[:.]\s*(\d{2})", re.I)
@@ -1210,6 +1370,82 @@ def start_map_timer(t: "Tracker") -> None:
     threading.Thread(target=run, daemon=True).start()
 
 
+SCREEN_LOG = DATA / "screen_log.jsonl"
+
+
+def log_screen(kind: str, w: int, h: int, words: list, got) -> None:
+    """What was read from a screen, as text (one JSON line each) instead of keeping the image."""
+    try:
+        line = json.dumps({"t": round(time.time(), 1), "kind": kind, "size": [w, h],
+                           "text": [" ".join(q[4] for q in ln) for ln in ocr_lines(words)],
+                           "read": got}, ensure_ascii=False, default=str)
+        with SCREEN_LOG.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def start_screenshot_conversion(t: "Tracker") -> None:
+    """Once: screenshots saved by older versions become text in screen_log.jsonl. Their summaries
+    give each past match its hunter and kills, their death screens add deaths to AI, then each
+    image is deleted (new screens are only kept as text). Paused while you're in a hunt."""
+    if os.name != "nt" or not FROZEN or t.cfg.get("keep_screenshots") or not SUMMARY_DIR.exists():
+        return  # the script version keeps its screenshots (they're the test set)
+    import struct
+
+    def match_at(ts):
+        c = [m for m in t.hist["matches"] if m["key"] <= ts and ts - m["key"] < 2 * 3600]
+        return c[-1] if c else None
+
+    def run():
+        files = sorted(SUMMARY_DIR.rglob("*.png"))
+        last_ai = {}
+        for f in files:
+            while (t.cur or {}).get("state") in ("hunt", "found"):
+                time.sleep(20)  # never compete with the screen reading during a match
+            try:
+                ts = dt.datetime.strptime(f.stem[:19], "%Y-%m-%d_%H-%M-%S").timestamp()
+            except ValueError:
+                ts = f.stat().st_mtime
+            try:
+                w, h = struct.unpack(">II", f.read_bytes()[16:24])
+                words = ocr_words(f)
+            except Exception:  # noqa: BLE001 - unreadable: leave it
+                continue
+            kind = f.parent.name if f.parent != SUMMARY_DIR else "summary"
+            txt = " ".join(q[4] for q in words)
+            got, m = None, match_at(ts)
+            if re.search(r"killed\s*by", txt, re.I):
+                kind = "death"
+                got = read_death(words, w, h)
+                if got.get("ai") and m is not None and ts - last_ai.get(m["key"], 0) > 90:
+                    last_ai[m["key"]] = ts
+                    m.setdefault("deaths", {})[f"old-{int(ts)}"] = {
+                        "ai:" + got["ai"].lower(): {"n": 1, "name": got["ai"], "ai": True}}
+                    t._tally(m)
+            elif kind == "summary" and m is not None:
+                hunter, kills = read_summary_hunter(words), read_summary_kills(words)
+                if hunter and not m.get("hunter"):
+                    m["hunter"] = hunter
+                if kills is not None and kills > m.get("kills", -1):
+                    m["kills"] = kills
+                got = {"hunter": hunter, "kills": kills}
+            try:
+                line = json.dumps({"t": round(ts, 1), "kind": kind, "size": [w, h], "old": True,
+                                   "text": [" ".join(q[4] for q in ln) for ln in ocr_lines(words)],
+                                   "read": got}, ensure_ascii=False, default=str)
+                with SCREEN_LOG.open("a", encoding="utf-8") as fh:
+                    fh.write(line + "\n")
+                f.unlink()
+            except OSError:
+                pass
+            time.sleep(0.3)
+        t.changed_at = time.time()
+        t._save()
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 def start_summary_capture(t: "Tracker") -> None:
     """While Hunt has focus: save each new post-match summary screen, read the Statistics /
     weapon stats page into the Career stats, and read loading cards / death screens into the player log."""
@@ -1273,8 +1509,11 @@ def start_summary_capture(t: "Tracker") -> None:
                 last_sig = sig
                 if lobby and not (summary or stats or folder):
                     lobby_at = time.time()
-                    write_png(lobby_png, w, h, px)
-                    lw = ocr_words(lobby_png)
+                    lw = ocr_frame(w, h, px)
+                    if cur.get("state") == "search":  # readied up: who you're taking (re-read if you switch)
+                        picked = read_lobby_hunter(lw, w, h)
+                        if picked:
+                            t.record_ready_hunter(*picked)
                     # Only the squad stats screen: the 3D team lobby turned banners and text into fake names.
                     cols = read_columns(lw, h)
                     if cols and max(len(c["stats"]) for c in cols) >= 5:
@@ -1282,31 +1521,39 @@ def start_summary_capture(t: "Tracker") -> None:
                     continue
                 shots += 1
                 if summary or folder:
-                    out = SUMMARY_DIR / folder if folder else SUMMARY_DIR
-                    out.mkdir(parents=True, exist_ok=True)
-                    png = out / f"{time.strftime('%Y-%m-%d_%H-%M-%S')}.png"
-                    write_png(png, w, h, px)
+                    kind = folder or "summary"
+                    name = f"{time.strftime('%Y-%m-%d_%H-%M-%S')}.png"
+                    if t.cfg.get("keep_screenshots", False):  # off: the text log below is kept instead
+                        out = SUMMARY_DIR / folder if folder else SUMMARY_DIR
+                        out.mkdir(parents=True, exist_ok=True)
+                        write_png(out / name, w, h, px)
                     t.capture_note = ""
+                    words = ocr_frame(w, h, px)
+                    got = None
                     if not folder:
-                        k = read_summary_kills(ocr_words(png), w, h, px)
-                        if k is not None:
-                            t.record_summary_kills(k)
+                        got = read_summary_kills(words, w, h, px)
+                        if got is not None:
+                            t.record_summary_kills(got)
+                        played = read_summary_hunter(words)
+                        if played:
+                            t.record_summary_hunter(played)
                     elif folder == "loading_cards":
-                        cols = read_columns(ocr_words(png), h)
-                        if cols:
-                            t.record_players(cols, "cards", png.name)
+                        got = read_columns(words, h)
+                        if got:
+                            t.record_players(got, "cards", name)
                     elif folder == "death":
-                        t.record_death(read_death(ocr_words(png), w, h), png.name)
+                        got = read_death(words, w, h)
+                        t.record_death(got, name)
                     elif folder == "team_details":  # every scroll position: whichever rows are on screen
-                        rows = read_team_details(ocr_words(png), w, h, px)
-                        if rows:
-                            t.record_mmrs(rows)
+                        got = read_team_details(words, w, h, px)
+                        if got:
+                            t.record_mmrs(got)
+                    log_screen(kind, w, h, words, got)
                 else:
                     time.sleep(0.4)  # let the page finish its fade-in, then read a settled frame
                     img = grab_foreground()
                     if img:
-                        write_png(stats_png, *img)
-                        sw = ocr_words(stats_png)
+                        sw = ocr_frame(*img)
                         if cardstats:
                             got = read_profile_stat(sw, *img, Path(tempfile.gettempdir()) / "hunttracker_card.png")
                             if got:
@@ -1476,6 +1723,8 @@ class Tracker:
                     self._note_hunter_kills(c["stats"], m)
                 self.note_my_stats(c["stats"])
                 continue
+            if not_a_player(c["name"]):
+                continue
             p = self._player(c["name"])
             # Squad-page stats and card stats are kept apart: a card never overwrites the page.
             if kind == "lobby":
@@ -1526,8 +1775,18 @@ class Tracker:
     def _read(self, kind: str, data: dict, file: str) -> None:
         self.hist["reads"] = (self.hist["reads"] + [{"t": time.time(), "kind": kind, "file": file, **data}])[-20:]
 
+    def record_ready_hunter(self, hunter: str, full: str) -> None:
+        """The hunter on screen while you're readied up. Un-ready and switch, and the next read
+        replaces it; the match found next takes whatever was last read."""
+        self.ready_hunter = {"hunter": hunter, "skin": full, "t": time.time()}
+
     def new_match(self) -> None:
-        self.hist["matches"] = (self.hist["matches"] + [{"key": time.time(), "cards": [], "killers": []}])[-100:]
+        m = {"key": time.time(), "cards": [], "killers": []}
+        rh = getattr(self, "ready_hunter", None)
+        if rh and time.time() - rh["t"] < 30 * 60:  # read while searching for this match
+            m["hunter"], m["hunter_skin"] = rh["hunter"], rh["skin"]
+        self.ready_hunter = None
+        self.hist["matches"] = (self.hist["matches"] + [m])[-100:]
         c = load_career()
         if c and c.pop("deltas", None) is not None:  # the green +N notes last until the next match
             CAREER_PATH.write_text(json.dumps(c, indent=2), encoding="utf-8")
@@ -1547,6 +1806,8 @@ class Tracker:
             hm = re.fullmatch(r"(.+?) K(?:i|il|ill|ills)?", label)  # OCR often cuts it to "Lilith K"
             if not hm or not isinstance(val, int) or hm.group(1).lower() in weapons or "deadeye" in label.lower():
                 continue
+            if looks_like_weapon(hm.group(1), weapons):  # a misread weapon stat ("Serni-Aut01natic Kills")
+                continue
             hunter = hm.group(1)
             hk = c.setdefault("hunter_kills", {})
             if hk.get(hunter, {}).get("n") != val or hk.get(hunter, {}).get("match") != m["key"]:
@@ -1554,19 +1815,69 @@ class Tracker:
                 tmp = CAREER_PATH.with_suffix(".tmp")
                 tmp.write_text(json.dumps(c, indent=2), encoding="utf-8")
                 tmp.replace(CAREER_PATH)
-            m["hunter"] = hunter
+            m["card_hunter"] = hunter  # whose kills your card shows, not necessarily who you play
+
+    def hunter_table(self) -> list:
+        """[(hunter, kills, hunts)] for every hunter you've played, most kills first. A count the game
+        showed (your card, or Hunter With Most Kills) plus matches after it; otherwise just the kills
+        from match summaries since the tracker first saw you play that hunter."""
+        hk = dict((load_career() or {}).get("hunter_kills", {}))
+        played: dict = {}
+        for m in self.hist["matches"]:
+            if m.get("hunter"):
+                played.setdefault(m["hunter"], []).append(m)
+        out = []
+        for hunter in set(hk) | set(played):
+            since = hk.get(hunter, {}).get("match", 0)
+            ms = played.get(hunter, [])
+            kills = hk.get(hunter, {}).get("n", 0) + sum(m.get("kills", 0) for m in ms if m["key"] >= since)
+            out.append((hunter, kills, len(ms)))
+        return sorted(out, key=lambda r: (-r[1], r[0]))
+
+    def current_hunter_kills(self):
+        """(hunter, kills) for the hunter you're playing: the one you've readied up with, else your last
+        match's. Kills are the tracker's count until the game shows one (your card / Hunter With Most
+        Kills), which then takes over. None before any hunter has been read."""
+        rh = getattr(self, "ready_hunter", None)
+        hunter = rh["hunter"] if rh else next((m["hunter"] for m in reversed(self.hist["matches"])
+                                                if m.get("hunter")), None)
+        if not hunter:
+            return None
+        return next(((hn, k) for hn, k, _ in self.hunter_table() if hn == hunter), (hunter, 0))
 
     def hunter_kills(self):
         """(hunter, kills) for your hunter with the most kills. Each hunter's count comes from the last
         loading card showing it, plus "Hunters Killed" from that match's summary and later matches
         played with the same hunter."""
-        hk = (load_career() or {}).get("hunter_kills", {})
+        hk = dict((load_career() or {}).get("hunter_kills", {}))
+        for m in self.hist["matches"]:
+            if m.get("hunter") and m["hunter"] not in hk and m.get("kills"):
+                hk[m["hunter"]] = {"n": 0, "match": m["key"]}
         if not hk:
             return None
         def total(hunter, rec):
             return rec["n"] + sum(m.get("kills", 0) for m in self.hist["matches"]
                                   if m["key"] >= rec.get("match", 0) and m.get("hunter") == hunter)
         return max(((h, total(h, r)) for h, r in hk.items()), key=lambda hn: hn[1])
+
+    def player_info(self, name: str):
+        """Everything the tracker has on one player, for the panel that opens when you click them."""
+        k = self._key(name)
+        p = self.hist["players"].get(k)
+        if not p:
+            return None
+        deaths = []
+        for m in self.hist["matches"]:
+            for votes in (m.get("deaths") or {}).values():
+                if votes:
+                    v = max(votes.values(), key=lambda v: v["n"])
+                    if not v.get("ai") and self._key(v["name"]) == k:
+                        deaths.append((m["key"], v.get("hunter"), v.get("weapon")))
+        side = "teammate" if p.get("squad") or p.get("mmr_side") == "teammate" else (p.get("mmr_side") or "")
+        return {"name": p["name"], "first": p.get("first"), "last": p.get("last"), "seen": encounters(p),
+                "matches": sorted(p.get("matches", [])), "mmr": p.get("mmr"), "mmr_at": p.get("mmr_at"),
+                "side": side, "card_stats": p.get("card_stats", {}), "page_stats": p.get("page_stats", {}),
+                "killed_you": deaths}
 
     def record_mmrs(self, rows: list) -> None:
         """MMR stars from Team Details. Everyone's is kept quietly and only shown when you're matched
@@ -1581,6 +1892,8 @@ class Tracker:
                 if not self.hist["mmr"] or self.hist["mmr"][-1][1] != stars:
                     self.hist["mmr"].append([now, stars])
                     changed = True
+                continue
+            if not_a_player(name):
                 continue
             p = self._player(name)
             if p.get("mmr") != stars:
@@ -1668,6 +1981,13 @@ class Tracker:
             return w["dollars"], w["bonds"], e.get("dollars", 0), e.get("bonds", 0)
         return w["dollars"], w["bonds"], 0, 0
 
+    def record_summary_hunter(self, hunter: str) -> None:
+        """The hunter you played this match, from the summary's Hunter Progress ("Desert Rose")."""
+        if self.hist["matches"] and hunter and self.hist["matches"][-1].get("hunter") != hunter:
+            self.hist["matches"][-1]["hunter"] = hunter
+            self.changed_at = time.time()
+            self._save()
+
     def record_summary_kills(self, kills: int) -> None:
         """"Hunters Killed +N" from this match's summary; every frame shows the same number."""
         if not self.hist["matches"]:
@@ -1699,9 +2019,19 @@ class Tracker:
         outvotes a frame where OCR mangled the name."""
         self._read("death", death, file)
         killer = death.get("killer")
-        if not killer or not self.hist["matches"] or not getattr(self, "death_key", None):
+        if not self.hist["matches"] or not getattr(self, "death_key", None):
             return
         m = self.hist["matches"][-1]
+        if death.get("ai") and not killer:  # a monster (or fire, poison...): not a player
+            votes = m.setdefault("deaths", {}).setdefault(self.death_key, {})
+            v = votes.setdefault("ai:" + death["ai"].lower(), {"n": 0, "name": death["ai"], "ai": True})
+            v["n"] += 1
+            self._tally(m)
+            self.changed_at = time.time()
+            self._save()
+            return
+        if not killer:
+            return
         mates = m["cards"] + (self.hist.get("squad") or {}).get("names", [])
         if self._key(killer) in [self._key(n) for n in mates]:
             return  # a teammate's name on screen (voice chat), not who killed you
@@ -1718,14 +2048,18 @@ class Tracker:
     def _tally(self, m: dict) -> None:
         """This match's killers: each real death's winning name. The same player twice means they
         killed you, you got revived, and they killed you again."""
-        winners = []
+        winners, ai = [], []
         for votes in m.get("deaths", {}).values():
             if votes:
                 v = max(votes.values(), key=lambda v: v["n"])
+                if v.get("ai"):
+                    ai.append(v["name"])
+                    continue
                 p = self._player(v["name"])  # logged first, so a misread spelling matches the same player
                 p["hunter"], p["weapon"] = v.get("hunter"), v.get("weapon")
                 winners.append(p["name"])
         m["killers"] = winners
+        m["ai_killers"] = ai
         # Drop players that only existed as a misread killer name that lost the vote.
         keep = {self._key(k) for mm in self.hist["matches"] for k in mm.get("killers", [])}
         for k in [k for k, p in self.hist["players"].items()
@@ -1761,6 +2095,9 @@ class Tracker:
             for k in dict.fromkeys(self._key(x) for x in cur.get("killers", [])):
                 p = players.get(k, {})
                 killers.append((p.get("name", k), kills.get(k, 1), p.get("weapon")))
+            ai_all = [a for mm in matches for a in mm.get("ai_killers", [])]
+            for a in dict.fromkeys(cur.get("ai_killers", [])):
+                killers.append((f"{a} (AI)", ai_all.count(a), None))
         often = sorted(((p.get("name", n), encounters(p), p.get("last", 0)) for n, p in players.items()
                         if encounters(p) > 1), key=lambda x: (-x[1], -x[2]))
         last_read = self.hist["reads"][-1] if self.hist["reads"] else None
@@ -1956,9 +2293,11 @@ class Tracker:
             "avg_deaths": sum(h.get("deaths", 0) for h in hunts) / n if n else None,
             "avg_queue": sum(qs) / len(qs) if qs else None,
             "clash_n": sum(1 for h in hunts if h.get("mode") == "Bounty Clash"),
+            "ai_deaths": [a for mm in self.hist["matches"] for a in mm.get("ai_killers", [])],
             "career": load_career() or {"empty": True}, "page": self.cfg.get("page", "tracker"),
             "summary_kills": self.summary_kills(), "wallet": self.wallet_view(),
-            "hunter_kills": self.hunter_kills(),
+            "hunter_kills": self.current_hunter_kills() or self.hunter_kills(),
+            "hunter_table": self.hunter_table(),
             "hidden_families": self.cfg.get("hidden_families", []),
             "mmr": self.hist["mmr"][-1][1] if self.hist["mmr"] else None,
             "mmr_prev": self.hist["mmr"][-2][1] if len(self.hist["mmr"]) > 1 else None,
@@ -2286,6 +2625,7 @@ def players_scene(v: dict, min_h: int = 0, W: int = 360):
     for p in pl["this"]:
         rows_n = (min(3, len(p["stats"])) or (1 if p.get("hidden") else 0)) + (1 if p.get("mmr") is not None else 0)
         rect(PAD - 4, y, W - PAD + 4, y + 22 + 17 * rows_n, C["panel"], C["inner"])
+        ops.append(("hot", PAD - 4, y, W - PAD + 4, y + 22 + 17 * rows_n, "player:" + p["name"]))
         text(PAD + 4, y + 4, clip(p["name"], 19 if p["seen"] > 1 else 30), 14, C["cream"], bold=True)
         if p["seen"] > 1:
             text(W - PAD - 4, y + 6, f"(encountered {p['seen']} times)", 10, C["gold"], "end", bold=True)
@@ -2312,6 +2652,8 @@ def players_scene(v: dict, min_h: int = 0, W: int = 360):
         text(PAD, y, "Nobody yet this match.", 12, C["dim"])
         y += 24
     for n, c, weapon in pl["killers"][:8]:
+        if not n.endswith(" (AI)"):
+            ops.append(("hot", PAD - 4, y - 2, W - PAD + 4, y + (34 if weapon else 18), "player:" + n))
         text(PAD, y, clip(n, 24), 13, C["cream"])
         if c > 1:  # they've killed you before: every time, all matches
             text(W - PAD - 4, y, f"×{c}", 13, C["red"], "end", bold=True, mono=True)
@@ -2420,9 +2762,17 @@ def scene(v: dict, min_h: int = 0, W: int = 360, block_at=None, block: str = "de
             if icons and icon_png(a_, 8):
                 ops.append(("image", tx, ry, a_, 14))
                 tx += 18
-            text(tx, ry, a_, 12, C["dim"])
-            text(int(col_x + cw - 12), ry - 1, num(b_), 13, C["cream"], "end", bold=True, mono=True)
             d = (deltas or {}).get(a_)
+            # The label shrinks (then shortens with "...") to stay clear of its number: narrow windows,
+            # a vertical monitor, long names like "Hannah Whitelaw (1 hunt)".
+            room = (col_x + cw - 12) - 8 * len(num(b_)) - ((6 + 6 * len(f"+{num(d)}")) if d else 0) - 8 - tx
+            lab, size = a_, 12
+            while size > 8 and len(lab) * size * 0.5 > room:
+                size -= 1
+            while len(lab) > 4 and len(lab) * size * 0.5 > room:
+                lab = lab[:-2].rstrip(" (") + "…"
+            text(tx, ry + (12 - size) // 2, lab, size, C["dim"])
+            text(int(col_x + cw - 12), ry - 1, num(b_), 13, C["cream"], "end", bold=True, mono=True)
             if d:
                 text(int(col_x + cw - 12 - 8 * len(num(b_)) - 6), ry, f"+{num(d)}", 10, C["green"], "end", bold=True)
         if half > 0:
@@ -2484,6 +2834,9 @@ def scene(v: dict, min_h: int = 0, W: int = 360, block_at=None, block: str = "de
         elif not (tv and family_of(tv["name"]) not in hidden):
             text(PAD, y, "all hidden: click the heading to pick which to show", 11, C["dim"])
             y += 24
+        if v.get("hunter_table"):
+            y = section(y + 4, "KILLS BY HUNTER")
+            y = rows2(y, [(f"{hn}  ({n} hunt{'s' if n != 1 else ''})", k) for hn, k, n in v["hunter_table"]]) + 6
         if c.get("empty"):
             text(PAD, y, "fills in when you open your Statistics pages in Hunt", 10, C["dim"])
         else:
@@ -2578,6 +2931,8 @@ def scene(v: dict, min_h: int = 0, W: int = 360, block_at=None, block: str = "de
             ("Quick leaves (<5 min)", f"{v['quick_n']}  ({pct(v['quick_n'], v['all_hunts'])})", "quick"),
             ("Hunts w/o death screen*", f"{v['nodeath_n']}  ({pct(v['nodeath_n'], v['all_hunts'])})", "nodeath"),
             ("Death screens per hunt", f"{v['avg_deaths']:.1f}" if v["avg_deaths"] is not None else "-", "deaths"),
+            ("Deaths to AI", (f"{len(v['ai_deaths'])}  (most: {max(set(v['ai_deaths']), key=v['ai_deaths'].count)})"
+                              if v.get("ai_deaths") else "0")),
             ("Average queue wait", fmt_dur(v["avg_queue"]) if v["avg_queue"] is not None else "-", "queue"),
             ("Bounty Clash hunts", str(v["clash_n"]), "clash"),
             ("Sessions", f"{v['sessions']}  ({v['per_session']:.1f} hunts each)" if v["per_session"] else "-",
@@ -2907,6 +3262,114 @@ def on_a_monitor(x: int, y: int) -> bool:
     return bool(ctypes.windll.user32.MonitorFromPoint(pt, 0))  # 0 = MONITOR_DEFAULTTONULL
 
 
+# ------------------------------------------------------------------ leaderboard
+# A free Firebase Realtime Database holds everyone's shared stats at <URL>/players/<uid>.json.
+# Each copy signs in anonymously, so it can only ever write its own entry (see the database rules).
+# Empty URL = no server yet: the LEADERBOARD panel says so and nothing is sent anywhere.
+LEADERBOARD_URL = "https://hunt-tracker-leaderboard-default-rtdb.firebaseio.com"
+LEADERBOARD_KEY = "AIzaSyAH_iRkVse016gT0tGuh1e0rrOxUvP2q0M"  # the Firebase project's Web API key (public by design; the rules do the guarding)
+# (label on the leaderboard, id stored online, career section, key): the Career page's top boxes.
+LB_STATS = [("Kills", "kills", "headline", "Players Killed"), ("Deaths", "deaths", "headline", "Killed by Player"),
+            ("Assists", "assists", "headline", "Kill Assists"), ("K/D", "kd", "headline", "K/D"),
+            ("KDA", "kda", "headline", "KDA"), ("Wipes", "wipes", "headline", "Teams Wiped"),
+            ("Headshots", "headshots", "headline", "Headshots"), ("Bounty", "bounty", "headline", "Total Bounty"),
+            ("Monsters", "monsters", "headline", "Monsters Killed"),
+            ("Bosses", "bosses", "headline", "Boss Targets Killed"),
+            ("Furthest Kill", "furthest", "profile_stats", "Furthest Kill Distance"),
+            ("Maxed-Out Hunters", "maxed", "other", "Maxed-Out Hunters")]
+_lb_token: dict = {}
+
+
+def lb_entry(c: dict) -> dict:
+    """Your Career numbers as one leaderboard entry (only what's been read), keyed by stat id."""
+    stats = {}
+    for _label, sid, sec, key in LB_STATS:
+        v = c.get(sec, {}).get(key)
+        if isinstance(v, (int, float)):
+            stats[sid] = v
+    e = {"name": (c.get("name") or "")[:40], "stats": stats, "t": int(time.time()), "v": VERSION}
+    for k in ("prestige", "rank"):
+        if isinstance(c.get(k), int):
+            e[k] = c[k]
+    return e
+
+
+def _lb_post(url: str, body: dict) -> dict:
+    import urllib.request
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=8) as r:
+        return json.loads(r.read())
+
+
+def _lb_auth(cfg: dict) -> str:
+    """A sign-in token for this copy (anonymous: no account, just a random id kept in the settings)."""
+    if _lb_token.get("exp", 0) > time.time() + 60:
+        return _lb_token["id"]
+    if cfg.get("leaderboard_refresh"):
+        r = _lb_post(f"https://securetoken.googleapis.com/v1/token?key={LEADERBOARD_KEY}",
+                     {"grant_type": "refresh_token", "refresh_token": cfg["leaderboard_refresh"]})
+        tok, uid, ref, exp = r["id_token"], r["user_id"], r["refresh_token"], r["expires_in"]
+    else:
+        r = _lb_post(f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={LEADERBOARD_KEY}",
+                     {"returnSecureToken": True})
+        tok, uid, ref, exp = r["idToken"], r["localId"], r["refreshToken"], r["expiresIn"]
+    _lb_token.update(id=tok, exp=time.time() + int(exp))
+    if (cfg.get("leaderboard_id"), cfg.get("leaderboard_refresh")) != (uid, ref):
+        cfg["leaderboard_id"], cfg["leaderboard_refresh"] = uid, ref
+        try:
+            CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+    return tok
+
+
+def _lb_request(method: str, path: str, body=None, token: str = ""):
+    import urllib.request
+    url = f"{LEADERBOARD_URL.rstrip('/')}/{path}.json" + (f"?auth={token}" if token else "")
+    req = urllib.request.Request(url, method=method, data=None if body is None else json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json", "User-Agent": f"HuntTracker/{VERSION}"})
+    with urllib.request.urlopen(req, timeout=8) as r:
+        return json.loads(r.read() or b"null")
+
+
+def lb_upload(cfg: dict, c: dict) -> bool:
+    if not LEADERBOARD_URL or not cfg.get("leaderboard_opt_in"):
+        return False
+    e = lb_entry(c)
+    if not e["name"] or not e["stats"]:
+        return False
+    try:
+        tok = _lb_auth(cfg)
+        _lb_request("PUT", f"players/{cfg['leaderboard_id']}", e, tok)
+        return True
+    except Exception:  # noqa: BLE001 - offline: try again later
+        return False
+
+
+def lb_remove(cfg: dict) -> None:
+    if LEADERBOARD_URL and cfg.get("leaderboard_refresh"):
+        try:
+            tok = _lb_auth(cfg)
+            _lb_request("DELETE", f"players/{cfg['leaderboard_id']}", token=tok)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def lb_fetch():
+    """Everyone's shared entries (stats under their labels), or None if the server can't be reached."""
+    if not LEADERBOARD_URL:
+        return None
+    try:
+        rows = list((_lb_request("GET", "players") or {}).values())
+    except Exception:  # noqa: BLE001
+        return None
+    label = {sid: lab for lab, sid, _s, _k in LB_STATS}
+    for r in rows:
+        r["stats"] = {label.get(k, k): v for k, v in (r.get("stats") or {}).items()}
+    return rows
+
+
 def check_for_update():
     """(version, download url) of a newer release on GitHub, or None."""
     import urllib.request
@@ -3053,7 +3516,7 @@ def run_window(t: Tracker) -> None:
     detailed = tk.BooleanVar(value=bool(t.cfg.get("detailed", True)))
     career = tk.BooleanVar(value=t.cfg.get("page") == "career")
     players = tk.BooleanVar(value=bool(t.cfg.get("players_panel", True)))
-    root.attributes("-topmost", top.get())
+    root.attributes("-topmost", False)
     # A slim toolbar across the top with the view toggles (replaces the old right-click menu).
     BAR_H = 30
     bar = tk.Frame(root, bg="#0b0908", height=BAR_H)
@@ -3168,7 +3631,6 @@ def run_window(t: Tracker) -> None:
         ("CAREER", career, refresh_view, lambda: True),
         ("PLAYER SUMMARY", players, refresh_view, lambda: True),
         ("DETAILED", detailed, lambda: (toggle_detail(), paint_bar()), lambda: True),
-        ("ON TOP", top, lambda: (toggle_top(), paint_bar()), lambda: True),
     ]
     buttons = []
 
@@ -3276,7 +3738,9 @@ def run_window(t: Tracker) -> None:
 
     def on_click(e):
         key = hot_at(e.x, e.y)
-        if key:
+        if key and key.startswith("player:"):
+            open_player(key[len("player:"):])
+        elif key:
             open_graph(key)
         elif st.get("graph"):
             close_graph()  # a click anywhere else folds the graph away, like a menu
@@ -3287,7 +3751,7 @@ def run_window(t: Tracker) -> None:
 
     def graph_area():
         """Where the graph pops out: over the Lifetime list, from its first row to its footnotes."""
-        zones = getattr(canvas, "hot", [])
+        zones = [z for z in getattr(canvas, "hot", []) if z[4] in STAT_GRAPHS]
         if not zones:
             return None
         x0, x1 = min(z[0] for z in zones), max(z[2] for z in zones)
@@ -3488,6 +3952,273 @@ def run_window(t: Tracker) -> None:
     note = tk.Label(bar, bg="#0b0908", fg="#6f6456", font=(TEXT_FONT, 9), padx=12, text=f"v{VERSION}")
     note.pack(side="right", fill="y")
 
+    # ---- a player's whole record, over the window (click a name in Player Summary)
+    def open_player(name):
+        info = t.player_info(name)
+        if not info:
+            return
+        close_graph()
+        old = st.pop("player", None)
+        if old is not None and old.winfo_exists():
+            old.destroy()
+        frame = tk.Frame(canvas, bg=C["blood"])
+        cv = tk.Canvas(frame, bg=C["panel"], highlightthickness=0, bd=0)
+        cv.pack(fill="both", expand=True, padx=1, pady=1)
+        st["player"] = frame
+        frame.place(relx=0.5, y=10, anchor="n", relwidth=0.96, relheight=0.96)
+
+        def close_p(_e=None):
+            if frame.winfo_exists():
+                frame.destroy()
+            st.pop("player", None)
+
+        def draw(_e=None):
+            cv.delete("all")
+            Wd, Hd = max(cv.winfo_width(), 300), max(cv.winfo_height(), 200)
+            sc = max(0.7, min(1.4, Wd / 560))
+            F = lambda s_, b=False: (TEXT_FONT, int(s_ * sc), "bold" if b else "normal")  # noqa: E731
+            day = lambda ts: dt.datetime.fromtimestamp(ts).strftime("%b %d %H:%M") if ts else "-"  # noqa: E731
+            cv.create_text(20, 14, anchor="nw", text=info["name"], fill=C["cream"], font=F(18, True))
+            x_ = cv.create_text(Wd - 14, 14, anchor="ne", text="✕", fill=C["brass"], font=F(14, True))
+            cv.tag_bind(x_, "<Button-1>", close_p)
+            y = 14 + 36 * sc
+            col_w = (Wd - 60) / 2
+
+            def head(x, y, txt):
+                cv.create_text(x, y, anchor="nw", text=txt, fill=C["brass"], font=F(11, True))
+                return y + 22 * sc
+
+            def row(x, y, a, b, col=None):
+                cv.create_text(x, y, anchor="nw", text=a, fill=C["dim"], font=F(11))
+                cv.create_text(x + col_w - 10, y, anchor="ne", text=str(b), fill=col or C["cream"], font=(NUM_FONT, int(12 * sc), "bold"))
+                return y + 19 * sc
+
+            # left column: who they are to you
+            yl = head(20, y, "ENCOUNTERS")
+            yl = row(20, yl, "Seen in", f"{info['seen']} match{'es' if info['seen'] != 1 else ''}")
+            yl = row(20, yl, "First seen", day(info["first"]))
+            yl = row(20, yl, "Last seen", day(info["last"]))
+            if info["side"]:
+                yl = row(20, yl, "Last met as", info["side"])
+            if info["mmr"] is not None:
+                yl = row(20, yl, "MMR", "★" * info["mmr"] + "☆" * (6 - info["mmr"]), C["gold"])
+                yl = row(20, yl, "MMR read", day(info["mmr_at"]))
+            yl += 8
+            yl = head(20, yl, f"KILLED YOU  ({len(info['killed_you'])})")
+            if not info["killed_you"]:
+                yl = row(20, yl, "never", "")
+            for ts, hn, wp in info["killed_you"][-8:]:
+                cv.create_text(20, yl, anchor="nw", text=day(ts), fill=C["dim"], font=F(10))
+                cv.create_text(20, yl + 15 * sc, anchor="nw", text=" · ".join(x for x in (hn, wp) if x) or "-",
+                               fill=C["cream"], font=F(11), width=col_w - 10)
+                yl += 38 * sc
+            # right column: their stats
+            xr = 40 + col_w
+            yr = y
+            for title, stats in (("SQUAD SCREEN STATS", info["page_stats"]), ("LOADING CARD STATS", info["card_stats"])):
+                if stats:
+                    yr = head(xr, yr, title)
+                    for a, b in stats.items():
+                        yr = row(xr, yr, a, f"{b:,}" if isinstance(b, int) else b)
+                    yr += 8
+            if not (info["page_stats"] or info["card_stats"]):
+                yr = head(xr, yr, "STATS")
+                yr = row(xr, yr, "none read yet", "")
+            if info["matches"]:
+                yr = head(xr, yr + 4, "MATCHES TOGETHER")
+                for ts in info["matches"][-6:]:
+                    yr = row(xr, yr, day(ts), "")
+
+        cv.bind("<Configure>", draw)
+        root.bind("<Escape>", lambda e: (close_p() if st.get("player") else close_graph() if st.get("graph") else close(e)))
+
+    # ---- leaderboard: a panel over the window; your stats are only sent while sharing is on
+    lb_btn = tk.Label(bar, bg="#0b0908", fg="#6f6456", font=(TEXT_FONT, 10, "bold"), padx=12,
+                      text="◇ LEADERBOARD", cursor="hand2")
+    lb_btn.pack(side="left", fill="y")
+    lb = {"stat": 0, "rows": None, "loading": False}
+
+    def lb_set_share(on: bool):
+        t.cfg["leaderboard_opt_in"] = on
+        save_cfg()
+        c = load_career() or {}
+        threading.Thread(target=(lambda: lb_upload(t.cfg, c)) if on else (lambda: lb_remove(t.cfg)),
+                         daemon=True).start()
+        lb_refresh()
+
+    def lb_refresh():
+        if lb["loading"]:
+            return
+        lb["loading"] = True
+
+        box = {}
+        threading.Thread(target=lambda: box.update(rows=lb_fetch()), daemon=True).start()
+
+        def wait():  # Tk only takes calls from its own thread: check back for the answer
+            if "rows" not in box:
+                root.after(100, wait)
+                return
+            lb["rows"], lb["loading"] = box["rows"], False
+            lb_draw()
+        root.after(100, wait)
+
+    def lb_close(_e=None):
+        p = st.pop("lb", None)
+        if p is not None and p.winfo_exists():
+            p.destroy()
+        lb_btn.configure(text="◇ LEADERBOARD", fg="#6f6456")
+
+    def lb_open(_e=None):
+        if st.get("lb") is not None and st["lb"].winfo_exists():
+            lb_close()
+            return
+        close_graph()
+        frame = tk.Frame(canvas, bg=C["blood"])
+        cv = tk.Canvas(frame, bg=C["panel"], highlightthickness=0, bd=0)
+        cv.pack(fill="both", expand=True, padx=1, pady=1)
+        st["lb"] = frame
+        frame.place(relx=0.5, y=10, anchor="n", relwidth=0.96, relheight=0.96)
+        cv.bind("<Configure>", lambda _e: lb_draw())
+        lb_btn.configure(text="◆ LEADERBOARD", fg=C["brass"])
+        lb_refresh()
+
+    def lb_draw():
+        frame = st.get("lb")
+        if frame is None or not frame.winfo_exists():
+            return
+        cv = frame.winfo_children()[0]
+        cv.delete("all")
+        Wd, Hd = max(cv.winfo_width(), 300), max(cv.winfo_height(), 200)
+        sc = max(0.7, min(1.5, Wd / 520))
+        F = lambda s, b=False: (TEXT_FONT, int(s * sc), "bold" if b else "normal")  # noqa: E731
+        NF = lambda s: (NUM_FONT, int(s * sc), "bold")  # noqa: E731
+
+        def button(x, y, txt, cmd, anchor="nw", size=11, col=None):
+            it = cv.create_text(x, y, text=txt, anchor=anchor, fill=col or C["brass"], font=F(size, True))
+            cv.tag_bind(it, "<Button-1>", lambda _e: cmd())
+            cv.tag_bind(it, "<Enter>", lambda _e: (cv.itemconfigure(it, fill=C["cream"]), cv.configure(cursor="hand2")))
+            cv.tag_bind(it, "<Leave>", lambda _e: (cv.itemconfigure(it, fill=col or C["brass"]), cv.configure(cursor="")))
+            return cv.bbox(it)
+
+        cv.create_text(20, 14, text="LEADERBOARD", anchor="nw", fill=C["brass"], font=F(17, True))
+        button(Wd - 14, 14, "✕", lb_close, "ne", 14)
+        on = t.cfg.get("leaderboard_opt_in")
+        y = 14 + 34 * sc
+        if not LEADERBOARD_URL:
+            cv.create_text(20, y, anchor="nw", fill=C["dim"], font=F(11), width=Wd - 40,
+                           text="The leaderboard server isn't set up yet. Nothing is shared until it is.")
+            return
+        cv.create_text(20, y, anchor="nw", fill=C["green"] if on else C["dim"], font=F(11),
+                       text="◆ You're sharing your Career stats" if on else "◇ You're not sharing your stats")
+        button(Wd - 20, y, "Stop sharing" if on else "Share my stats", lambda: lb_set_share(not on), "ne", 11,
+               C["red"] if on else C["gold"])
+        y += 30 * sc
+        label = LB_STATS[lb["stat"]][0]
+        bx = button(20, y, "◂", lambda: (lb.update(stat=(lb["stat"] - 1) % len(LB_STATS)), lb_draw()), size=14)
+        it = cv.create_text(bx[2] + 12, y + 2, text=label.upper(), anchor="nw", fill=C["gold"], font=F(13, True))
+        button(cv.bbox(it)[2] + 12, y, "▸", lambda: (lb.update(stat=(lb["stat"] + 1) % len(LB_STATS)), lb_draw()),
+               size=14)
+        button(Wd - 20, y + 2, "refresh", lb_refresh, "ne", 10, C["dim"])
+        y += 34 * sc
+        cv.create_line(20, y, Wd - 20, y, fill=C["blood"])
+        y += 10
+        rows = lb["rows"]
+        if rows is None:
+            cv.create_text(20, y, anchor="nw", fill=C["dim"], font=F(11),
+                           text="loading..." if lb["loading"] else "Couldn't reach the leaderboard (offline?).")
+            return
+        ranked = sorted([r for r in rows if isinstance(r.get("stats", {}).get(label), (int, float))],
+                        key=lambda r: -r["stats"][label])
+        if not ranked:
+            cv.create_text(20, y, anchor="nw", fill=C["dim"], font=F(11), text="No one has shared this stat yet.")
+            return
+        me = (load_career() or {}).get("name")
+
+        def fmtv(lab, v_):
+            if v_ is None:
+                return "-"
+            return (f"{v_:.2f}" if isinstance(v_, float) else f"{v_:,}") + ("m" if lab == "Furthest Kill" else "")
+
+        sel = next((r for r in ranked if r.get("name") == lb.get("open")), None)
+        if sel:  # one player's whole card, laid out like the Career page's boxes
+            bx = button(20, y, "◂ back", lambda: (lb.update(open=None), lb_draw()), size=11)
+            nm = sel.get("name", "?") + (f"  ·  prestige {sel['prestige']}, rank {sel.get('rank') or '-'}"
+                                         if sel.get("prestige") is not None else "")
+            cv.create_text(bx[2] + 18, y, anchor="nw", text=nm, fill=C["cream"], font=F(13, True))
+            y += 34 * sc
+            s_ = sel.get("stats", {})
+            groups = [["Kills", "Deaths", "Assists"], ["K/D", "KDA", "Wipes", "Headshots"],
+                      ["Bounty", "Monsters", "Bosses"], ["Furthest Kill", "Maxed-Out Hunters"]]
+            box_h = min(64 * sc, (Hd - y - 12) / 4 - 8)
+            for grp in groups:
+                cv.create_rectangle(20, y, Wd - 20, y + box_h, fill=C["bg"], outline=C["inner"])
+                cw_ = (Wd - 40) / len(grp)
+                for j, lab in enumerate(grp):
+                    cx = 20 + cw_ * j + cw_ / 2
+                    if j:
+                        cv.create_line(20 + cw_ * j, y + 10, 20 + cw_ * j, y + box_h - 10, fill=C["inner"])
+                    col = C["gold"] if lab == label else C["brass"]
+                    cv.create_text(cx, y + box_h * 0.18, text=lab.upper(), fill=col, font=F(10, True))
+                    cv.create_text(cx, y + box_h * 0.42, anchor="n", text=fmtv(lab, s_.get(lab)), fill=C["cream"],
+                                   font=NF(18))
+                y += box_h + 8
+            return
+        # Compact list: rank, name, then kills / deaths / assists / K/D (the sorting stat in gold).
+        cols = ["Kills", "Deaths", "Assists", "K/D"]
+        if label not in cols:
+            cols.append(label)
+        col_w = 74 * sc
+        xs = [Wd - 24 - col_w * (len(cols) - 1 - j) for j in range(len(cols))]
+        for x, lab in zip(xs, cols):
+            cv.create_text(x, y, anchor="ne", text=lab.upper(), fill=C["gold"] if lab == label else C["dim"],
+                           font=F(9, True))
+        y += 20 * sc
+        row_h = 26 * sc
+        for i, r in enumerate(ranked):
+            if y + row_h > Hd - 8:
+                break
+            mine = on and r.get("name") == me
+            hit = cv.create_rectangle(12, y - 3, Wd - 12, y + row_h - 5, fill=C["faint"] if mine else C["panel"],
+                                      outline=C["inner"] if mine else "")
+            col = C["gold"] if i == 0 else C["cream"] if mine else C["brass"]
+            items = [hit, cv.create_text(24, y, anchor="nw", text=f"{i + 1}.", fill=col, font=NF(13)),
+                     cv.create_text(24 + 40 * sc, y + 1, anchor="nw", text=r.get("name", "?"), fill=col,
+                                    font=F(12, mine))]
+            for x, lab in zip(xs, cols):
+                items.append(cv.create_text(x, y, anchor="ne", text=fmtv(lab, r.get("stats", {}).get(lab)),
+                                            fill=C["gold"] if lab == label else col, font=NF(13)))
+            for it_ in items:  # click a player for their whole card
+                cv.tag_bind(it_, "<Button-1>", lambda _e, n=r.get("name"): (lb.update(open=n), lb_draw()))
+                cv.tag_bind(it_, "<Enter>", lambda _e: cv.configure(cursor="hand2"))
+                cv.tag_bind(it_, "<Leave>", lambda _e: cv.configure(cursor=""))
+            y += row_h
+
+    lb_btn.bind("<Button-1>", lb_open)
+    lb_btn.bind("<Enter>", lambda e: lb_btn.configure(fg=C["brass"]))
+    lb_btn.bind("<Leave>", lambda e: lb_btn.configure(fg=C["brass"] if st.get("lb") else "#6f6456"))
+
+    def lb_keep_fresh():
+        """While sharing: send your numbers whenever your Career stats change (checked each minute)."""
+        c = load_career() or {}
+        sig = json.dumps(lb_entry(c)["stats"], sort_keys=True)
+        if t.cfg.get("leaderboard_opt_in") and sig != st.get("lb_sig"):
+            st["lb_sig"] = sig
+            threading.Thread(target=lambda: lb_upload(t.cfg, c), daemon=True).start()
+        root.after(60_000, lb_keep_fresh)
+
+    def lb_ask():
+        """The first time (once there's a server and Career stats): share or not? Changeable any time."""
+        if LEADERBOARD_URL and t.cfg.get("leaderboard_opt_in") is None and lb_entry(load_career() or {})["stats"]:
+            yes = messagebox.askyesno(
+                "Hunt Tracker - Leaderboard",
+                "Share your Career stats (kills, deaths, K/D, KDA, bounty...) on the Hunt Tracker leaderboard?\n\n"
+                "Only your player name and those numbers are shared. You can change this any time with "
+                "LEADERBOARD at the top of the window.", parent=root)
+            lb_set_share(bool(yes))
+
+    root.after(4000, lb_ask)
+    root.after(8000, lb_keep_fresh)
+
     redraw(force=True)
     tick()
     root.mainloop()
@@ -3631,6 +4362,7 @@ def main() -> None:
     t.poll()
     if not args.svg:
         start_summary_capture(t)
+        start_screenshot_conversion(t)
         start_map_timer(t)
     if args.svg:
         Path(args.svg).write_text(build_svg(t.view()), encoding="utf-8")

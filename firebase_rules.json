@@ -1,0 +1,22 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "players": {
+      ".read": true,
+      "$uid": {
+        ".write": "auth != null && auth.uid === $uid",
+        ".validate": "newData.hasChildren(['name', 'stats', 't'])",
+        "name": { ".validate": "newData.isString() && newData.val().length > 0 && newData.val().length <= 40" },
+        "prestige": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 100" },
+        "rank": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 100" },
+        "t": { ".validate": "newData.isNumber()" },
+        "v": { ".validate": "newData.isString() && newData.val().length <= 20" },
+        "stats": {
+          "$stat": { ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 100000000" }
+        },
+        "$other": { ".validate": false }
+      }
+    }
+  }
+}

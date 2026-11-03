@@ -15,10 +15,14 @@ and installing Hunt Tracker, you agree to them.
      Windows' built-in text recognition.
    - It checks whether the Tab key is held down during a hunt, to read the
      map's timer.
-   - It saves what it reads (stats, player names, MMR stars, and some of the
-     screenshots) in your user folder: %LOCALAPPDATA%\HuntTracker
-   - It never changes, injects into, or reads the memory of the game, and it
-     does not send any data over the internet.
+   - It saves what it reads (stats, player names, MMR stars, and the text of
+     those screens; not the images) in your user folder:
+     %LOCALAPPDATA%\HuntTracker
+   - It never changes, injects into, or reads the memory of the game.
+   - Internet: it checks GitHub for updates when it opens. If you choose to
+     share on the leaderboard (it asks first, and you can stop any time),
+     your player name and Career numbers (kills, deaths, K/D, bounty...) are
+     uploaded to the Hunt Tracker leaderboard. Nothing else is sent.
 
 3. OPTIONAL AUTO-START
    If you choose it during setup, a small helper starts with Windows and

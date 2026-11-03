@@ -1,8 +1,9 @@
 # Hunt Tracker
 
 A live stats window for **Hunt: Showdown 1896**. Put it on your second monitor and it fills itself in
-while you play: what you're doing right now, your hunts and hours, your career stats, weapon kills,
-MMR, and the players you keep running into. You don't press or type anything.
+while you play: what you're doing right now, your hunts and hours, your career stats, weapon and
+hunter kills, MMR, the players you keep running into, and a leaderboard with your friends.
+You don't press or type anything.
 
 ![The tracker window](docs/tracker.png)
 
@@ -21,37 +22,78 @@ it and reopens. Your data is kept.
 Windows may warn that the app is from an unknown publisher the first time (it isn't code-signed):
 click **More info → Run anyway**.
 
+## What's new in 1.0.11
+
+- **Leaderboard**: share your Career stats (opt in or out any time) and see how you rank against
+  everyone else using the tracker.
+- **Kills by hunter**: the tracker notes which hunter you readied up with and counts that match's
+  kills for them. Your loading card's or profile's "<Hunter> Kills" number takes over whenever the
+  game shows one. The kills row on the main page follows the hunter you're playing.
+- **Deaths to AI**: "Killed by Meathead" (or a Hive, Butcher, a fall...) is counted, instead of being
+  missed or mistaken for a player.
+- **Click a player** in Player Summary to see everything tracked about them.
+- **Faster screen reading**: Windows' text recognition is now called straight from memory, about
+  10× faster than before, and it reads screens the old way sometimes missed.
+- **Text log instead of images**: what each screen said is kept as text (`screen_log.jsonl`); new
+  screenshots aren't stored. Screenshots saved by older versions are read once and then removed.
+- **Cleaner player list**: menu text, card titles ("Bound by Blood") and number plates are no longer
+  logged as players, and "2 Maester" is now just Maester.
+- Labels shrink to fit narrow or vertical windows; the ON TOP toggle is gone (it's meant for a
+  second monitor).
+
 ## What it tracks
 
 **Right now**
 - Whether you're in the menus, searching, loading in, in a hunt or on the post-match screen
 - In a hunt: the time left on the mission (an estimate until you hold Tab, then synced to the map's timer)
 - Your MMR stars (from Team Details after a match), and whether they went up or down
-- Total known kills, your most-played hunter's kills, Hunt Dollars and Blood Bonds
+- Total known kills, kills with the hunter you're playing, Hunt Dollars and Blood Bonds
 
 **Today / last 7 days**
 - Hunts, time hunting and the current session length, plus a bar chart of the last 7 days
 
-**Lifetime (from your logs)** — click any of these to pop out a day-by-day graph
+**Lifetime (from your logs)**: click any of these to pop out a day-by-day graph
 - Hunts tracked, time hunting, time in game, all-time hours from Steam
 - Average, longest and shortest hunt, quick leaves (under 5 minutes)
-- Hunts without a death screen, death screens per hunt, average queue wait
+- Hunts without a death screen, death screens per hunt, deaths to AI, average queue wait
 - Bounty Clash hunts, sessions, busiest day, hunter level
 
 ![A lifetime stat's graph](docs/graph.png)
 
-**Career** (read from your in-game Statistics page)
+**Career** (read from your in-game Statistics page, squad screen and profile card)
 - Kills, deaths, assists, K/D, KDA, wipes, headshots, bounty, monsters, bosses, furthest kill
 - Kills by weapon type (rifle, shotgun, sniper, silencer…) and by weapon family (Crossbow, Krag,
   Vetterli 71…), plus your variant with the most kills
+- Kills by hunter, for every hunter you've played
 - A family picker: click **KILLS BY WEAPON FAMILY ▾** to choose which families are shown
 
 ![The Career page](docs/career.png)
 
-**Player Summary**
+**Player Summary** (other players' names are blurred in these screenshots)
 - Your squad and the other players from the loading cards, with their stats
-- Who killed you this match and how often they've killed you overall
+- Who killed you this match (players and AI) and how often they've killed you overall
 - Anyone you've met before ("encountered 3 times") and their MMR from last time
+- Click a player for their whole record: when you met, teammate or enemy, MMR, every stat read
+  from their card and squad screen, and each time they killed you (hunter and weapon)
+
+![Player Summary](docs/players.png)
+![One player's record](docs/player_card.png)
+
+## Leaderboard
+
+Click **LEADERBOARD** at the top. The first time, the tracker asks whether to share your Career
+stats; you can switch it with **Share my stats / Stop sharing** whenever you like, and stopping
+removes your entry.
+
+- Each row shows **kills, deaths, assists and K/D**; ◂ ▸ picks the stat everyone is ranked by.
+- Click a player for their full card: kills, deaths, assists, K/D, KDA, wipes, headshots, bounty,
+  monsters, bosses, furthest kill and maxed-out hunters.
+- Only your player name and those numbers are shared. The board lives in a free Firebase Realtime
+  Database; each copy of the tracker signs in anonymously and can only change its own entry
+  (see [firebase_rules.json](firebase_rules.json)).
+
+![The leaderboard](docs/leaderboard.png)
+![A leaderboard card](docs/leaderboard_card.png)
 
 ## How it works
 
@@ -62,31 +104,37 @@ tracker gathers them from two places:
    start searching, load into a match or return to the lobby. The tracker reads those lines to
    know what you're doing and how long each hunt and queue took. It also reads older logs once,
    so your history starts before you installed it.
-2. **The screen, only while Hunt is the active window.** On specific screens (loading cards,
-   death screens, the post-match summary, Team Details, the Statistics pages and the map timer)
-   it takes a screenshot and reads the text with **Windows' built-in text recognition**
-   (`Windows.Media.Ocr`, run through PowerShell). Nothing is uploaded anywhere.
+2. **The screen, only while Hunt is the active window.** On specific screens (the lobby while
+   you're readied up, loading cards, the squad screen, death screens, the post-match summary,
+   Team Details, the Statistics pages and the map timer) it grabs the screen and reads the text
+   with **Windows' built-in text recognition** (`Windows.Media.Ocr`), straight from memory.
+   What it read is kept as text; no image is saved.
 
-Steam's all-time playtime comes from Steam's own `localconfig.vdf`. That's everything: no game
-memory, no network traffic to or from the game, no input sent to the game.
+Steam's all-time playtime comes from Steam's own `localconfig.vdf`. No game memory, no network
+traffic to or from the game, no input sent to the game.
 
 ## Your data
 
-Everything stays on your PC:
+Everything stays on your PC unless you choose to share on the leaderboard:
 
 | What | Where (installed app) |
 | --- | --- |
 | Settings | `%LOCALAPPDATA%\HuntTracker\hunttracker.json` |
-| Hunts, sessions, players, MMR | `%LOCALAPPDATA%\HuntTracker\hunttracker_history.json` |
-| Career stats | `%LOCALAPPDATA%\HuntTracker\hunttracker_career.json` |
-| Saved post-match screenshots | `%LOCALAPPDATA%\HuntTracker\summaries\` |
+| Hunts, sessions, players, MMR, deaths | `%LOCALAPPDATA%\HuntTracker\hunttracker_history.json` |
+| Career stats, kills by hunter | `%LOCALAPPDATA%\HuntTracker\hunttracker_career.json` |
+| What each screen said (text) | `%LOCALAPPDATA%\HuntTracker\screen_log.jsonl` |
 
-The only thing it fetches from the internet is the update check against this repo's releases
-(turn it off with `"auto_update": false` in the settings).
+The internet is only used for the update check against this repo's releases (turn it off with
+`"auto_update": false`) and, if you opt in, the leaderboard.
 
 ## Running from source
 
-Plain Python 3.9+ on Windows, no packages to install.
+Python 3.9+ on Windows. For the fast in-memory text recognition install the Windows packages
+(without them it falls back to PowerShell, which is slower but needs nothing):
+
+```bash
+py -m pip install winrt-runtime winrt-Windows.Media.Ocr winrt-Windows.Graphics.Imaging winrt-Windows.Storage winrt-Windows.Storage.Streams winrt-Windows.Foundation winrt-Windows.Foundation.Collections winrt-Windows.Globalization
+```
 
 ```bash
 py hunttracker.py            # the tracker window
@@ -95,8 +143,8 @@ py hunttracker.py --console  # text only
 py hunttracker.py --log "D:\Steam\steamapps\common\Hunt Showdown 1896\USER\Game.log"
 ```
 
-Run from source, it keeps its settings and data next to the script. It finds `Game.log`
-by itself through your Steam libraries, or asks you for it once.
+Run from source, it keeps its settings and data next to the script, and it never deletes saved
+screenshots. It finds `Game.log` by itself through your Steam libraries, or asks you for it once.
 
 The weapon icons and the background picture come from Hunt itself, so they aren't in this
 repository (they belong to Crytek). Without them the tracker works the same, just without the
@@ -104,8 +152,8 @@ icons and the backdrop; the installer has them.
 
 ## Building the installer
 
-Needs [PyInstaller](https://pyinstaller.org) (`py -m pip install pyinstaller`) and
-[Inno Setup 6](https://jrsoftware.org/isinfo.php).
+Needs [PyInstaller](https://pyinstaller.org) (`py -m pip install pyinstaller`),
+[Inno Setup 6](https://jrsoftware.org/isinfo.php) and the packages above.
 
 - `Build Installer.bat` draws the app icon, builds `Hunt Tracker.exe` with PyInstaller and wraps
   it in `installer\Output\HuntTrackerSetup.exe` with Inno Setup.
@@ -117,7 +165,8 @@ Needs [PyInstaller](https://pyinstaller.org) (`py -m pip install pyinstaller`) a
 
 | File | What it is |
 | --- | --- |
-| `hunttracker.py` | The whole app: log reading, screen reading, stats, drawing, updates |
+| `hunttracker.py` | The whole app: log reading, screen reading, stats, drawing, leaderboard, updates |
+| `firebase_rules.json` | Security rules for the leaderboard database |
 | `installer/HuntTracker.iss` | Inno Setup script (per-user install, optional "open with Hunt", silent updates) |
 | `installer/version.py` | Prints or raises the version in `hunttracker.py` |
 | `installer/make_icon.py` | Draws the app icon |

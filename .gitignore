@@ -5,8 +5,9 @@ hunttracker_career.json
 hunttracker_*.json
 *.tmp
 *.log
+screen_log*.jsonl
 summaries/
-README.txt
+/README.txt
 
 # Game artwork (belongs to Crytek): bundled in the installer, not published as source
 icons/
@@ -19,3 +20,4 @@ installer/dist/
 installer/Output/
 installer/*.spec
 installer/icon.ico
+backups/
