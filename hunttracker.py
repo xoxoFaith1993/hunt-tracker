@@ -58,6 +58,8 @@ DEFAULTS = {
     # Opens the overlay over Hunt: the game dimmed, the tracker's panels on top. Again (or Esc) closes it.
     # Hunt reads the keyboard directly, so it sees the key too: it must be one Hunt doesn't use.
     "overlay_key": "End",
+    # Diagnostics for the developer (see the terms): None = not asked yet, True = sent, False = off.
+    "diagnostics": None,
     # The OVERLAY button, remembered: on, the window stays hidden and the key combo opens the overlay;
     # off, the tracker is a normal window (say on a second monitor) and the game keeps the key.
     "overlay_mode": True,
@@ -2166,7 +2168,7 @@ def start_tray(t: "Tracker") -> None:
                     ("guidItem", ctypes.c_byte * 16), ("hBalloonIcon", wintypes.HICON)]
 
     WM_TRAY = 0x8001
-    CHOICES = {1: "overlay", 2: "windowed", 3: "open", 4: "quit"}
+    CHOICES = {1: "overlay", 2: "windowed", 3: "open", 4: "quit", 5: "diagnostics"}
 
     def run():
         def proc(hwnd, msg, wp, lp):
@@ -2178,6 +2180,8 @@ def start_tray(t: "Tracker") -> None:
                     u32.AppendMenuW(menu, 0 if on else 0x8, 2, "Windowed")
                     u32.AppendMenuW(menu, 0x800, 0, None)  # a separator
                     u32.AppendMenuW(menu, 0, 3, "Open")
+                    u32.AppendMenuW(menu, 0x8 if t.cfg.get("diagnostics") else 0, 5, "Send diagnostics")
+                    u32.AppendMenuW(menu, 0x800, 0, None)
                     u32.AppendMenuW(menu, 0, 4, "Quit Hunt Tracker")
                     pt = wintypes.POINT()
                     u32.GetCursorPos(ctypes.byref(pt))
@@ -4293,6 +4297,88 @@ def _lb_request(method: str, path: str, body=None, token: str = ""):
         return json.loads(r.read() or b"null")
 
 
+def _tail(path: Path, size: int) -> str:
+    """The last `size` bytes of a text file, from a line start ("" if there's no such file)."""
+    try:
+        with path.open("rb") as f:
+            f.seek(0, 2)
+            n = f.tell()
+            f.seek(max(0, n - size))
+            data = f.read().decode("utf-8", "replace")
+        return data if n <= size else data.split("\n", 1)[-1]
+    except OSError:
+        return ""
+
+
+def diag_report(t: "Tracker") -> dict:
+    """What's sent as diagnostics (see the terms): the tracker's setup, how its screen reading went
+    over the last week, its error logs, and the latest part of the screen text log."""
+    import platform
+    setup = {"version": VERSION, "installed": bool(FROZEN), "windows": f"{platform.release()} {platform.version()}",
+             "python": platform.python_version(), "ocr": "winrt" if _winrt_ocr() is not None else "powershell",
+             "overlay_mode": bool(t.cfg.get("overlay_mode")), "overlay_key": t.cfg.get("overlay_key", ""),
+             "page": t.cfg.get("page", ""), "players_panel": bool(t.cfg.get("players_panel"))}
+    if os.name == "nt":
+        import ctypes
+        u32 = ctypes.windll.user32
+        try:
+            buf = ctypes.create_unicode_buffer(85)
+            ctypes.windll.kernel32.GetUserDefaultLocaleName(buf, 85)
+            setup["locale"] = buf.value
+            setup["screen"] = [u32.GetSystemMetrics(0), u32.GetSystemMetrics(1)]  # the main monitor
+            setup["desktop"] = [u32.GetSystemMetrics(78), u32.GetSystemMetrics(79)]  # all monitors
+            setup["monitors"] = u32.GetSystemMetrics(80)
+            setup["dpi"] = u32.GetDpiForSystem() if hasattr(u32, "GetDpiForSystem") else None
+            hw, mon = hunt_monitor(full=True)
+            setup["hunt_running"] = bool(hw)
+            setup["hunt_monitor"] = list(mon)
+        except Exception:  # noqa: BLE001 - whatever couldn't be read is left out
+            pass
+    try:
+        game_cfg = (t.log.parent / "game.cfg").read_text(errors="ignore") if t.log else ""
+        m = re.search(r"r_WindowType\s*=\s*(\d)", game_cfg)
+        setup["hunt_window_type"] = int(m.group(1)) if m else None  # 0 window, 1 borderless, 2 fullscreen
+    except OSError:
+        pass
+    week = time.time() - 7 * 86400
+    ms = [m for m in t.hist.get("matches", []) if m.get("key", 0) > week]
+    counts = {"matches": len(ms), "with_cards": sum(1 for m in ms if m.get("cards")),
+              "with_summary_kills": sum(1 for m in ms if "kills" in m),
+              "with_team_details": sum(1 for m in ms if m.get("mmr_teams")),
+              "deaths": sum(len(m.get("deaths") or {}) for m in ms),
+              "deaths_named": sum(len(m.get("killers") or []) for m in ms),
+              "deaths_ai": sum(len(m.get("ai_killers") or []) for m in ms),
+              "players": len(t.hist.get("players", {})), "note": getattr(t, "capture_note", "")}
+    c = load_career() or {}
+    return {"t": int(time.time()), "v": VERSION, "name": str(t.cfg.get("player_name") or c.get("name") or "")[:40],
+            "setup": setup, "counts": counts,
+            "logs": {"crash": _tail(DATA / "crash.log", 20000), "overlay": _tail(DATA / "overlay.log", 8000),
+                     "capture": _tail(DATA / "capture_errors.log", 20000)},
+            "screens": _tail(DATA / "screen_log.jsonl", 100000)}
+
+
+def start_diagnostics(t: "Tracker") -> None:
+    """Sends the diagnostics report (when it's switched on) two minutes after starting, then every hour
+    if anything changed. Each copy only ever replaces its own report."""
+    def run():
+        time.sleep(120)
+        last = None
+        while True:
+            try:
+                if LEADERBOARD_URL and t.cfg.get("diagnostics"):
+                    rep_ = diag_report(t)
+                    sig = json.dumps({k: v for k, v in rep_.items() if k != "t"}, sort_keys=True)
+                    if sig != last:
+                        tok = _lb_auth(t.cfg)
+                        _lb_request("PUT", f"diagnostics/{t.cfg['leaderboard_id']}", rep_, tok)
+                        last = sig
+            except Exception:  # noqa: BLE001 - offline or refused: try again next time
+                pass
+            time.sleep(3600)
+
+    threading.Thread(target=run, daemon=True, name="diagnostics").start()
+
+
 def lb_upload(cfg: dict, c: dict) -> bool:
     if not LEADERBOARD_URL or not cfg.get("leaderboard_opt_in"):
         return False
@@ -5214,15 +5300,52 @@ def run_window(t: Tracker) -> None:
             threading.Thread(target=lambda: lb_upload(t.cfg, c), daemon=True).start()
         root.after(60_000, lb_keep_fresh)
 
+    def ask(title, text, yes="Yes", no="No"):
+        """A yes/no question in the tracker's style, kept on top (a plain message box can open behind
+        Hunt and freeze the overlay until it's answered). Closing it counts as No."""
+        win = tk.Toplevel(root, bg=C["blood"])
+        win.title(title)
+        win.attributes("-topmost", True)
+        win.resizable(False, False)
+        body = tk.Frame(win, bg=C["panel"], padx=22, pady=18)
+        body.pack(fill="both", expand=True, padx=1, pady=1)
+        tk.Label(body, text=title.upper(), bg=C["panel"], fg=C["brass"], font=(TEXT_FONT, 13, "bold")).pack(anchor="w")
+        tk.Label(body, text=text, bg=C["panel"], fg=C["cream"], font=(TEXT_FONT, 11), justify="left",
+                 wraplength=520).pack(anchor="w", pady=(10, 16))
+        answer = {"v": False}
+        row = tk.Frame(body, bg=C["panel"])
+        row.pack(anchor="e")
+        for label, val in ((no, False), (yes, True)):
+            b_ = tk.Label(row, text=label, bg="#0b0908", fg=C["brass"] if val else C["dim"], cursor="hand2",
+                          font=(TEXT_FONT, 11, "bold"), padx=16, pady=6)
+            b_.pack(side="left", padx=(8, 0))
+            b_.bind("<Button-1>", lambda _e, v_=val: (answer.update(v=v_), win.destroy()))
+        win.update_idletasks()
+        _hw, (l, tp, r, b) = hunt_monitor()
+        win.geometry(f"+{l + (r - l - win.winfo_reqwidth()) // 2}+{tp + (b - tp - win.winfo_reqheight()) // 3}")
+        win.after(50, lambda: (focus(hwnd_of(win)), win.focus_force()))
+        win.wait_window()
+        return answer["v"]
+
     def lb_ask():
-        """The first time (once there's a server and Career stats): share or not? Changeable any time."""
+        """The first time (once there's a server and Career stats): share or not? Changeable any time.
+        Then, once: the diagnostics notice (in the terms; updates install silently, so it's said here too)."""
         if LEADERBOARD_URL and t.cfg.get("leaderboard_opt_in") is None and lb_entry(load_career() or {})["stats"]:
-            yes = messagebox.askyesno(
-                "Hunt Tracker - Leaderboard",
-                "Share your Career stats (kills, deaths, K/D, KDA, bounty...) on the Hunt Tracker leaderboard?\n\n"
-                "Only your player name and those numbers are shared. You can change this any time with "
-                "LEADERBOARD at the top of the window.", parent=root)
+            yes = ask("Hunt Tracker - Leaderboard",
+                      "Share your Career stats (kills, deaths, K/D, KDA, bounty...) on the Hunt Tracker leaderboard?\n\n"
+                      "Only your player name and those numbers are shared. You can change this any time with "
+                      "LEADERBOARD at the top of the window.")
             lb_set_share(bool(yes))
+        if LEADERBOARD_URL and t.cfg.get("diagnostics") is None:
+            t.cfg["diagnostics"] = ask(
+                "Hunt Tracker - Diagnostics",
+                "To find and fix problems, Hunt Tracker sends its developer a diagnostics report about once an "
+                "hour: its version and setup (Windows, screen size, display mode), how its screen reading went, "
+                "its error logs, and the text it recently read from Hunt's screens (which includes the names of "
+                "players on your loading cards and death screens). Nothing else is sent.\n\n"
+                "You can switch this off any time: right-click the tracker's icon by the clock.",
+                yes="OK, send them", no="Don't send")
+            save_cfg()
 
     root.after(4000, lb_ask)
     root.after(8000, lb_keep_fresh)
@@ -5685,9 +5808,13 @@ def run_window(t: Tracker) -> None:
                 set_mode(False) if mode else show_main()
             elif cmd == "open":
                 ov_open(why="tray") if mode else show_main()
+            elif cmd == "diagnostics":
+                t.cfg["diagnostics"] = not t.cfg.get("diagnostics")
+                save_cfg()
         root.after(100, check_overlay)
 
     start_tray(t)
+    start_diagnostics(t)
     check_overlay()
     if t.cfg.get("overlay_mode"):  # remembered: start hidden, ready for End
         root.withdraw()

@@ -35,6 +35,8 @@ click **More info → Run anyway**.
   note at the bottom of the screen when Hunt starts.
 - **Most kills in one hunt** has its own row.
 - **Prestige and rank** are read from your card on the lobby's squad page (the badges under your name).
+- **Diagnostics**: a report about once an hour helps find bugs (see [Your data](#your-data)); it asks once,
+  and can be switched off from the icon by the clock.
 - **Career keeps counting**: your kills, deaths, K/D and KDA go up from your matches between visits to
   the Statistics page; opening Statistics confirms or corrects them.
 - **Barcode names**: players whose names show as boxes (letters Hunt's font can't draw) are kept on the
@@ -183,7 +185,12 @@ Everything stays on your PC unless you choose to share on the leaderboard:
 | What each screen said (text) | `%LOCALAPPDATA%\HuntTracker\screen_log.jsonl` |
 
 The internet is only used for the update check against this repo's releases (turn it off with
-`"auto_update": false`) and, if you opt in, the leaderboard.
+`"auto_update": false`), the leaderboard if you opt in, and **diagnostics**: about once an hour a
+report goes to the developer with the tracker's version and setup, how its screen reading went (counts
+only), its error logs and the text it recently read from Hunt's screens, which includes other players'
+names from your loading cards and death screens. Only the developer can read reports. The tracker asks
+once when it starts; switch it off any time by right-clicking its icon by the clock (**Send
+diagnostics**).
 
 ## Running from source
 

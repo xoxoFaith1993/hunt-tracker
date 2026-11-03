@@ -25,7 +25,17 @@ and installing Hunt Tracker, you agree to them.
    - Internet: it checks GitHub for updates when it opens. If you choose to
      share on the leaderboard (it asks first, and you can stop any time),
      your player name and Career numbers (kills, deaths, K/D, bounty...) are
-     uploaded to the Hunt Tracker leaderboard. Nothing else is sent.
+     uploaded to the Hunt Tracker leaderboard.
+   - Diagnostics: to find and fix problems, it sends the developer a
+     diagnostics report about once an hour: the tracker's version and setup
+     (Windows version, screen sizes, Hunt's display mode, overlay or window),
+     your player name, how its screen reading went over the last week (counts
+     only), its error logs, and the text it recently read from Hunt's screens.
+     That text includes the names of other players shown on your loading
+     cards, squad page and death screens. Reports can only be read by the
+     developer. It asks once when it first starts; you can switch it off any
+     time by right-clicking the tracker's icon by the clock ("Send
+     diagnostics"). Nothing else is sent.
 
 3. OPTIONAL AUTO-START
    If you choose it during setup, a small helper starts with Windows and

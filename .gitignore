@@ -28,3 +28,5 @@ restore*.txt
 Copy Screen Log.bat
 Install Local Build.bat
 Restore Hunt Tracker Data.bat
+
+Read Diagnostics.py

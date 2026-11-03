@@ -17,6 +17,21 @@
         },
         "$other": { ".validate": false }
       }
+    },
+    "diagnostics": {
+      ".read": "auth != null && auth.uid === 'Xmb6G4ezSnZsKvmYBTKIucwwbzX2'",
+      "$uid": {
+        ".write": "auth != null && auth.uid === $uid",
+        ".validate": "newData.hasChildren(['t', 'v'])",
+        "t": { ".validate": "newData.isNumber()" },
+        "v": { ".validate": "newData.isString() && newData.val().length <= 20" },
+        "name": { ".validate": "newData.isString() && newData.val().length <= 40" },
+        "setup": { "$k": { ".validate": "!newData.isString() || newData.val().length <= 200" } },
+        "counts": { "$k": { ".validate": "!newData.isString() || newData.val().length <= 300" } },
+        "logs": { "$log": { ".validate": "newData.isString() && newData.val().length <= 25000" } },
+        "screens": { ".validate": "newData.isString() && newData.val().length <= 120000" },
+        "$other": { ".validate": false }
+      }
     }
   }
 }
