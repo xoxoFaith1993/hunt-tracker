@@ -1149,6 +1149,9 @@ def read_columns(words: list, height: int, px: bytes = b"", width: int = 0) -> l
     With the screen's pixels, a barcode name is kept as its boxes ("▮▮▮▮▮▮▮▮").
     -> [{"name", "stats", "x"}], left to right."""
     words = [w for w in words if w[1] < height * 0.86 and re.search("[0-9A-Za-z]", w[4])]  # no bottom status text
+    if re.search(r"back to game|shift\s*\+\s*tab|steam settings|achievements earned|push-to-",
+                 " ".join(w[4] for w in words), re.I):
+        return []  # the Steam overlay is in front: its menus aren't players
     lines = ocr_lines(words)
     is_num = lambda seg: all(NUM.match(q[4]) for q in seg)  # noqa: E731
 
@@ -1207,12 +1210,15 @@ def read_columns(words: list, height: int, px: bytes = b"", width: int = 0) -> l
     for k, ws in enumerate(lines):
         if ws[0][1] >= mid_y or STAT_WORDS.search(" ".join(q[4] for q in ws)):
             break  # the stats have started (a name can end in a number, so stat words decide, not numbers)
+        if ws[0][1] < height * 0.06:
+            continue  # the menu bar across the top ("PLAY  HUNTERS  Statistics ...")
         segs = segments(ws)
         if any(is_num(s) for s in segs) or title_row(k, segs):
             continue
         picked = []
         for cx in col_x:
-            near = [s for s in segs if abs(s[0][0] - cx) < slack]
+            # A page title above the cards ("Statistics", with only your card showing) isn't a name.
+            near = [s for s in segs if abs(s[0][0] - cx) < slack and not not_a_player(" ".join(q[4] for q in s))]
             if not near:
                 break
             picked.append(min(near, key=lambda s: abs(s[0][0] - cx)))
