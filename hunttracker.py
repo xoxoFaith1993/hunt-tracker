@@ -31,7 +31,7 @@ from xml.sax.saxutils import escape
 
 FROZEN = getattr(sys, "frozen", False)  # the installed .exe
 # "Publish Update.bat" bumps this and uploads the build; installed copies update themselves to it.
-VERSION = "1.0.11"
+VERSION = "1.0.12"
 UPDATE_REPO = "xoxoFaith1993/hunt-tracker"
 # A one-file .exe unpacks to a temp folder that __file__ points into; the install folder is the exe's.
 HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
@@ -122,18 +122,83 @@ def known_kills(c: dict, extra: int = 0):
     return max(by_type, by_family) + extra, src, extra
 
 
-def read_lobby_hunter(words: list, w: int, h: int):
+def read_lobby_hunter(words: list, w: int, h: int, px: bytes = b""):
     """The hunter you've picked, from the lobby: centred near the bottom, "Desert Rose: Dust Devil  50 / 50"
-    (name: skin, then the bloodline numbers). -> (hunter, full name with skin) or None."""
+    (name: skin, then the bloodline numbers). -> (hunter, full name with skin, (level, cap)) or None.
+    With the pixels, that line is read again enlarged and dark-on-white, which catches small words
+    the full-screen read drops ("The Scarecrow" read as "Th Scarecrow")."""
     for ln in ocr_lines([q for q in words if q[1] > h * 0.8 and w * 0.25 < q[0] < w * 0.75]):
+        while ln and not re.search("[A-Za-z]{2}", ln[0][4]):
+            ln = ln[1:]  # the hunter-level badge left of the name ("0", read as "90")
         txt = " ".join(q[4] for q in ln)
-        full = re.split(r"\s*[\d/@+]", txt, maxsplit=1)[0].strip(" .:")
-        if not re.search("[A-Za-z]{3}", full) or re.search(r"invite|player|ready|search|cancel", full, re.I):
+        if not re.search(r"\d+\s*/\s*\d+", txt):
+            continue  # the hunter's line always carries its bloodline count ("50 / 50"); buttons don't
+        if px and ln:
+            import tempfile
+            crop = Path(tempfile.gettempdir()) / "hunttracker_hunter.png"
+            top, bot = min(q[1] for q in ln), max(q[1] + q[3] for q in ln)
+            write_crop_png(crop, w, h, px, ln[0][0] - 12, top - 8, ln[-1][0] + ln[-1][2] + 12, bot + 8, scale=3)
+            again = [q for q in ocr_words(crop)]
+            while again and not re.search("[A-Za-z]{2}", again[0][4]):
+                again = again[1:]
+            sharp = " ".join(q[4] for q in sorted(again, key=lambda q: q[0]))
+            if re.search(r"\d+\s*/\s*\d+", sharp) and re.search("[A-Za-z]{3}", sharp):
+                txt = sharp
+        full = re.split(r"\s*[\d/@+]", txt, maxsplit=1)[0].strip(" .:'\"`")
+        if not re.search("[A-Za-z]{3}", full) or re.search(r"invite|player|ready|search|cancel|view|loadout|team|press",
+                                                           full, re.I):
             continue
-        hunter = re.split(r"[:.]", full, maxsplit=1)[0].strip()
-        if re.fullmatch(r"[A-Za-z][A-Za-z '\-]{2,}", hunter) and not looks_like_weapon(hunter):
-            return hunter, full
+        hunter = re.split(r":|(?<=[A-Za-z]{4})\.\s", full, maxsplit=1)[0].strip()
+        if re.fullmatch(r"[A-Za-z][A-Za-z .'\-]{2,}", hunter) and not looks_like_weapon(hunter):
+            # The level sits after an up-arrow icon that OCR reads as a "4" ("'4 1 / 50", "411 / 50"
+            # for 11 / 50): every digit between the name and the "/", minus that first one.
+            rest = txt[len(full):] if txt.startswith(full) else txt
+            lv = re.search(r"^(.*?)/\s*(\d+)", rest)
+            digits = re.sub(r"\D", "", lv.group(1)) if lv else ""
+            if digits.startswith("4") and len(digits) >= 2:
+                digits = digits[1:]
+            level = (int(digits), int(lv.group(2))) if digits and 0 <= int(digits) <= int(lv.group(2)) <= 100 else None
+            return hunter, full, level  # level: the hunter's level and its cap ("11 / 50")
     return None
+
+
+def read_game_menu(words: list, w: int, h: int):
+    """The in-match Game Menu (Esc): a card per squad member with their name, badges and hunter level
+    ("4 49 ↑1/50"), and their hunter ("Desert Rose: Dust Devil") over a "Health" bar. A backup for
+    the loading cards. -> [{"name", "hunter", "full", "level"}] or None when this isn't that screen."""
+    if not re.search(r"continue\s*playing|game\s*menu", " ".join(q[4] for q in words), re.I):
+        return None
+    lines = ocr_lines(words)
+    i = next((k for k, ln in enumerate(lines) if any(q[4].lower() == "health" for q in ln)), None)
+    if i is None or i < 3:
+        return None
+    cols = [q[0] for q in lines[i] if q[4].lower() == "health"]
+
+    def split(ln):
+        out = [[] for _ in cols]
+        for q in ln:
+            j = min(range(len(cols)), key=lambda j: abs(q[0] - cols[j]))
+            if abs(q[0] - cols[j]) < w * 0.2:
+                out[j].append(q)
+        return out
+    players = []
+    for n, s, hu in zip(split(lines[i - 3]), split(lines[i - 2]), split(lines[i - 1])):
+        name = trim_name(n) if n else ""
+        if len(name) < 2 or not_a_player(name):
+            continue
+        full = " ".join(q[4] for q in hu).strip(" .:")
+        hunter = re.split(r":|(?<=[A-Za-z]{4})\.\s", full, maxsplit=1)[0].strip() if full else ""
+        level = None
+        lv = re.search(r"(\d+)\s*/\s*(\d+)", " ".join(q[4] for q in s))
+        if lv:
+            digits = lv.group(1)
+            if digits.startswith("4") and len(digits) >= 2:
+                digits = digits[1:]  # the level's up-arrow read as a "4" (a maxed hunter shows a star instead)
+            if 0 <= int(digits) <= int(lv.group(2)) <= 100:
+                level = (int(digits), int(lv.group(2)))
+        ok = re.fullmatch(r"[A-Za-z][A-Za-z .'\-]{2,}", hunter or "") and not looks_like_weapon(hunter)
+        players.append({"name": name, "hunter": hunter if ok else "", "full": full if ok else "", "level": level})
+    return players or None
 
 
 def read_summary_hunter(words: list):
@@ -150,7 +215,7 @@ def read_summary_hunter(words: list):
             name = " ".join(words)
             if re.search(r"progress|summary|bloodline|mission|bounty|killed", name, re.I):
                 return None  # another heading, not a hunter
-            return name if re.fullmatch(r"[A-Za-z][A-Za-z '\-]{2,}", name) else None
+            return name if re.fullmatch(r"[A-Za-z][A-Za-z .'\-]{2,}", name) else None
     return None
 
 
@@ -356,6 +421,7 @@ def parse_log(text: str, min_hunt: int = 120) -> dict:
     ui_open: set = set()
     mode, q_req, q_pending = "Bounty Hunt", None, None
     death_n, revived, revived_at, death_starts = 0, True, None, []
+    ready = False  # readied up in the lobby (the green check), from SetReadyState
     for line in text.splitlines():
         if sid is None and line.startswith("Log Started at"):
             sid, base = line.strip(), header_epoch(line)
@@ -391,13 +457,16 @@ def parse_log(text: str, min_hunt: int = 120) -> dict:
             elif "User requested to leave mission" in body:
                 cur["left"] = True
 
+        if "CUIOnlineManager::SetReadyState(" in body:
+            ready = "SetReadyState(true)" in body
+
         if body.startswith("CMetaMissionBag state:"):
             st = body.split(":", 1)[1].strip()
             if st == "MissionStarted":
                 if cur is None:
                     cur = {"start": t, "mode": mode, "deaths": 0, "q": q_pending, "left": False}
                     q_pending, death_n, revived, revived_at = None, 0, True, None
-                state = "hunt"
+                state, ready = "hunt", False
             elif st == "ContentsDumped":
                 if cur is not None:
                     d = t - cur["start"]
@@ -430,6 +499,7 @@ def parse_log(text: str, min_hunt: int = 120) -> dict:
             elif "Stopping UI state machine 'post_match_summary" in body:
                 state = "menu"
     return {"sid": sid, "base": base, "state": state, "start": cur["start"] if cur else None,
+            "ready": ready and state != "hunt",
             "mode": cur["mode"] if cur else None,
             "hunt_t": (base + (cur["start"] - first)) if (cur and base) else None,
             "cur_deaths": cur["deaths"] if cur else 0,
@@ -466,11 +536,10 @@ def hunt_running() -> bool:
 
 
 # ------------------------------------------------------------------ summary screenshots (Windows only, no extra installs)
-def hunt_is_foreground() -> bool:
+def _is_hunt_window(hwnd) -> bool:
     import ctypes
     from ctypes import wintypes
     u32, k32 = ctypes.windll.user32, ctypes.windll.kernel32
-    hwnd = u32.GetForegroundWindow()
     if not hwnd:
         return False
     pid = wintypes.DWORD()
@@ -486,6 +555,57 @@ def hunt_is_foreground() -> bool:
         k32.CloseHandle(h)
 
 
+def hunt_window():
+    """Hunt's window when it can be read: in front, or showing uncovered (say on the main monitor
+    while you click around on the second one). None when it's minimized or something covers it."""
+    import ctypes
+    from ctypes import wintypes
+    u32 = ctypes.windll.user32
+    fg = u32.GetForegroundWindow()
+    if _is_hunt_window(fg):
+        return fg
+    found = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    def each(hwnd, _):
+        if u32.IsWindowVisible(hwnd) and not u32.IsIconic(hwnd) and _is_hunt_window(hwnd):
+            found.append(hwnd)
+            return False
+        return True
+    u32.EnumWindows(each, 0)
+    if not found:
+        return None
+    hwnd = found[0]
+    try:  # same pixel units as the grab
+        old = u32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
+    except AttributeError:
+        old = None
+    try:
+        r = wintypes.RECT()
+        u32.GetWindowRect(hwnd, ctypes.byref(r))
+        w, h = r.right - r.left, r.bottom - r.top
+        if w < 200 or h < 200:
+            return None
+        # Uncovered: the window at the middle and near each corner is Hunt itself.
+        for fx, fy in ((0.5, 0.5), (0.1, 0.1), (0.9, 0.1), (0.1, 0.9), (0.9, 0.9)):
+            pt = wintypes.POINT(int(r.left + w * fx), int(r.top + h * fy))
+            top = u32.WindowFromPoint(pt)
+            if u32.GetAncestor(top, 2) != hwnd:  # GA_ROOT
+                return None
+        return hwnd
+    finally:
+        if old:
+            u32.SetThreadDpiAwarenessContext(old)
+
+
+def hunt_is_foreground(strict: bool = False) -> bool:
+    """Hunt can be read: in front, or (unless strict) showing uncovered on screen."""
+    import ctypes
+    if strict:
+        return _is_hunt_window(ctypes.windll.user32.GetForegroundWindow())
+    return hunt_window() is not None
+
+
 def grab_foreground():
     """(width, height, BGRA bytes) of the foreground window, in real pixels."""
     import ctypes
@@ -497,7 +617,8 @@ def grab_foreground():
         old = None
     try:
         r = wintypes.RECT()
-        u32.GetWindowRect(u32.GetForegroundWindow(), ctypes.byref(r))
+        # Hunt's own window when it's readable (even if you clicked onto another monitor), else whatever's in front.
+        u32.GetWindowRect(hunt_window() or u32.GetForegroundWindow(), ctypes.byref(r))
         w, h = r.right - r.left, r.bottom - r.top
         if w <= 0 or h <= 0:
             return None
@@ -982,6 +1103,11 @@ def name_score(name: str):
 PAGE_STATS = ("KDA Ratio", "Teams Wiped")
 # Which of a player's card stats to show first in Player Summary.
 STAT_ORDER = ("Kills/Deaths", "KDA Ratio", "Teams Wiped", "Total Bounty", "Headshots", "Maxed-Out Hunters")
+# Words only stat labels use: once a row has one, the card stats have started.
+STAT_WORDS = re.compile(r"\b(kills?|killed|bounty|wiped|headshots|deaths|distance|ratio|contracts|slam|stack|"
+                        r"gauntlet|maxed-out)\b", re.I)
+
+
 def read_columns(words: list, height: int) -> list:
     """Side-by-side player columns (loading cards, or the lobby's squad stats):
     names in the top row, each player's "label ... number" stats below.
@@ -1013,7 +1139,8 @@ def read_columns(words: list, height: int) -> list:
                 while len(lw) > 1 and len(lw[0][4]) == 1:  # a stat's icon read as a stray letter ("e Teams Wiped")
                     lw = lw[1:]
                 label = " ".join(q[4] for q in lw)
-                if LABEL.match(label):
+                # A stat's label has words; the prestige / rank badges ("16 88" read as "616 988") don't.
+                if LABEL.match(label) and re.search("[A-Za-z]{2}", label):
                     raw = s[-1][4].replace(",", "")
                     stat_segs.append((lw[0][0], s[0][1], label, float(raw) if "." in raw else int(raw)))
     if not stat_segs:
@@ -1033,11 +1160,19 @@ def read_columns(words: list, height: int) -> list:
     slack = height * 0.13
     mid_y = sorted(s[1] for s in stat_segs)[len(stat_segs) // 2]
     names = None
-    for ws in lines:
-        if ws[0][1] >= mid_y:
-            break
+    top_y = min(sg[1] for sg in stat_segs)
+    # Cards now show a title ("Bound by Blood", "Survivalist") between the name and the stats: the row
+    # right above the first stats, or one made only of known titles, is never the name row.
+    first_stat = next((k for k, ws in enumerate(lines) if ws[0][1] >= top_y - 4), len(lines))
+
+    def title_row(k, segs):
+        return k == first_stat - 1 or all(not_a_player(" ".join(q[4] for q in sg)) for sg in segs)
+
+    for k, ws in enumerate(lines):
+        if ws[0][1] >= mid_y or STAT_WORDS.search(" ".join(q[4] for q in ws)):
+            break  # the stats have started (a name can end in a number, so stat words decide, not numbers)
         segs = segments(ws)
-        if any(is_num(s) for s in segs):
+        if any(is_num(s) for s in segs) or title_row(k, segs):
             continue
         picked = []
         for cx in col_x:
@@ -1049,9 +1184,24 @@ def read_columns(words: list, height: int) -> list:
             # Every name on this row, including players whose stats are hidden (they have no column).
             names = [s for s in segs if len(" ".join(q[4] for q in s)) >= 2]
             break
+    # No row with a name over every card: someone's name is hidden (streamer mode). Then the names are
+    # the row right above the prestige / rank numbers ("10 10 10"), with a gap where the hidden one is.
+    for k, ws in enumerate(lines[:-1]) if names is None else []:
+        if ws[0][1] >= top_y:
+            break
+        segs = [sg for sg in segments(ws) if len(re.sub("[^0-9A-Za-z]", "", " ".join(q[4] for q in sg))) >= 3]
+        if (segs and not title_row(k, segs) and not any(is_num(sg) for sg in segs)
+                and all(NUM.match(q[4]) for q in lines[k + 1])
+                and max(1, len(col_x) - 1) <= len(segs) <= len(col_x)
+                and all(any(abs(sg[0][0] - cx) < slack for cx in col_x) for sg in segs)):
+            names = segs  # the lowest such row (closest to the cards) wins over the menu bar
     if not names:
         return []
     cols = [{"name": trim_name(s), "x": s[0][0], "stats": {}} for s in names]
+    # A column of stats with no name over it: a hidden name. Its stats stay with it, not a neighbour.
+    for cx in col_x:
+        if not any(abs(c["x"] - cx) < slack for c in cols):
+            cols.append({"name": "", "x": cx, "stats": {}})
     name_y = names[0][0][1] + names[0][0][3]
     # Lobby: under the names comes a row of prestige / rank numbers, then the hunter row ("Lilith 0"),
     # which looks like a stat. Cards have badge numbers there and a title row with no numbers instead.
@@ -1065,7 +1215,7 @@ def read_columns(words: list, height: int) -> list:
         min(cols, key=lambda c: abs(c["x"] - x))["stats"][label] = val
     for c in cols:
         c["hidden"] = not c["stats"]  # the player set their stats to hidden
-    return cols
+    return sorted([c for c in cols if c["name"]], key=lambda c: c["x"])
 
 
 LOOKALIKE = str.maketrans({"0": "o", "1": "l", "i": "l", "|": "l", "5": "s"})
@@ -1155,14 +1305,16 @@ DEATH_SKIP = re.compile(r"hide|show|revive|profile|player names|spectate|back to
 # Menu text and player-card titles that sit where a name is read; never a player.
 NOT_PLAYERS = {"achievements", "bound by blood", "statistics", "steam settings", "searching", "game", "earned",
                "push-to-talk", "push-to-mute", "settings", "loading", "ready", "invite", "new recruit",
-               "seasoned hunter", "the prestigious", "meathead master", "outlaw", "butcher's bully", "mutant scum"}
+               "seasoned hunter", "the prestigious", "meathead master", "outlaw", "butcher's bully", "mutant scum",
+               "survivalist"}
 
 
 def not_a_player(name: str) -> bool:
     """Menu text, a card title or a stat ("Lilith Kills") read as a name."""
     n = re.sub(r"\s+", " ", name or "").strip().lower()
     return (n in NOT_PLAYERS or n.startswith("push-") or n.startswith("game re")
-            or re.fullmatch(r"\w+ kills?", n) is not None)
+            or re.fullmatch(r"\w+ kills?", n) is not None
+            or re.search(r"achievement|steam|back to game|in game|\bclip\b|settings|earned", n) is not None)
 
 
 def number_plate(name: str) -> bool:
@@ -1329,7 +1481,7 @@ def start_map_timer(t: "Tracker") -> None:
                 need_money = time.time() - money_at > 3  # money earned this match: keep it fresh
                 if not (need_timer or need_money):
                     continue
-                if not ctypes.windll.user32.GetAsyncKeyState(0x09) & 0x8000 or not hunt_is_foreground():
+                if not ctypes.windll.user32.GetAsyncKeyState(0x09) & 0x8000 or not hunt_is_foreground(strict=True):
                     continue
                 t0 = time.time()
                 img = grab_foreground()
@@ -1423,6 +1575,15 @@ def start_screenshot_conversion(t: "Tracker") -> None:
                     m.setdefault("deaths", {})[f"old-{int(ts)}"] = {
                         "ai:" + got["ai"].lower(): {"n": 1, "name": got["ai"], "ai": True}}
                     t._tally(m)
+            elif kind == "lobby":  # the menu bar's Hunt Dollars / Blood Bonds, for the money graph
+                try:
+                    import tempfile
+                    money = read_menu_money(Path(tempfile.gettempdir()) / "hunttracker_oldmoney.png", *read_png(f))
+                except Exception:  # noqa: BLE001
+                    money = None
+                if money:
+                    t.hist.setdefault("money_seed", []).append([ts, money[0], money[1]])
+                got = {"money": money}
             elif kind == "summary" and m is not None:
                 hunter, kills = read_summary_hunter(words), read_summary_kills(words)
                 if hunter and not m.get("hunter"):
@@ -1467,19 +1628,32 @@ def start_summary_capture(t: "Tracker") -> None:
                 cur = t.cur or {}
                 # Your Hunt Dollars / Blood Bonds from the menu's top-left bar, now and then.
                 if (cur.get("state") in ("menu", "search") and not cur.get("details_open")
-                        and time.time() - wallet_at > 20 and hunt_is_foreground()):
+                        and time.time() - wallet_at > 1 and hunt_is_foreground()):  # a small corner: cheap
                     wallet_at = time.time()
                     img = grab_foreground()
                     money = read_menu_money(wallet_png, *img) if img else None
                     if money:
                         t.record_wallet(*money)
+                # In a hunt: the Game Menu (Esc) shows your squad, your hunter and its level. A backup
+                # for the loading cards; checked every few seconds, read only when it's open.
+                if (cur.get("state") == "hunt" and not cur.get("death_open")
+                        and time.time() - was.get("menu_at", 0) > 4 and hunt_is_foreground()):
+                    was["menu_at"] = time.time()
+                    img = grab_foreground()
+                    if img:
+                        gm = read_game_menu(ocr_frame(*img), img[0], img[1])
+                        if gm:
+                            t.record_game_menu(gm)
+                            log_screen("game_menu", img[0], img[1], [], gm)
                 summary = cur.get("state") == "post" and t.cfg.get("save_summary_screens", True)
                 cardstats = bool(cur.get("cardstats_open"))  # Player Profile > Statistic: one per hover
                 stats = (cur.get("stats_open") or cardstats) and t.cfg.get("read_stats_page", True)
                 cards, death = bool(cur.get("cards_open")), bool(cur.get("death_open"))
                 # The squad stats page, while searching or once a match is found (it needs 5+ stats per
                 # column to count, so other menu screens don't get read as players).
-                lobby = cur.get("state") in ("search", "found") and not cards and time.time() - lobby_at > 6
+                # Also the lobby itself: the hunter you have picked is read whenever it's on screen.
+                lobby = ((cur.get("state") in ("search", "found", "menu") or cur.get("ready")) and not cards
+                         and not cur.get("details_open") and time.time() - lobby_at > 2)  # whole screen
                 if cards and not was["cards"]:
                     t.new_match()
                 dk = (t.hist["matches"][-1]["key"] if t.hist["matches"] else 0, cur.get("death_n"))
@@ -1510,10 +1684,9 @@ def start_summary_capture(t: "Tracker") -> None:
                 if lobby and not (summary or stats or folder):
                     lobby_at = time.time()
                     lw = ocr_frame(w, h, px)
-                    if cur.get("state") == "search":  # readied up: who you're taking (re-read if you switch)
-                        picked = read_lobby_hunter(lw, w, h)
-                        if picked:
-                            t.record_ready_hunter(*picked)
+                    picked = read_lobby_hunter(lw, w, h, px)  # the hunter you have picked, whenever it's showing
+                    if picked:
+                        t.record_ready_hunter(*picked)
                     # Only the squad stats screen: the 3D team lobby turned banners and text into fake names.
                     cols = read_columns(lw, h)
                     if cols and max(len(c["stats"]) for c in cols) >= 5:
@@ -1710,6 +1883,10 @@ class Tracker:
 
     def record_players(self, cols: list, kind: str, file: str) -> None:
         """Players read from the loading cards ("cards") or the lobby's squad stats ("lobby")."""
+        cols = [c for c in cols if not not_a_player(c["name"])]  # menu text ("Statistics") is nobody
+        me = self._me()
+        if not cols or (kind == "lobby" and len(cols) == 1 and me and self._key(cols[0]["name"]) != me):
+            return  # one column that isn't you: another stats page, not your squad
         self._read(kind, {"name": ", ".join(c["name"] for c in cols), "players": cols}, file)
         self._learn_me(cols)
         me = self._me()
@@ -1775,13 +1952,96 @@ class Tracker:
     def _read(self, kind: str, data: dict, file: str) -> None:
         self.hist["reads"] = (self.hist["reads"] + [{"t": time.time(), "kind": kind, "file": file, **data}])[-20:]
 
-    def record_ready_hunter(self, hunter: str, full: str) -> None:
-        """The hunter on screen while you're readied up. Un-ready and switch, and the next read
-        replaces it; the match found next takes whatever was last read."""
+    def tidy_hunters(self) -> None:
+        """Hunters read wrongly by earlier versions: a lobby button ("V View Team Loadouts"), a misread
+        weapon, or a cut-off name ("Rose"). Wrong ones are dropped, cut-off ones get the full name."""
+        bad = re.compile(r"view|loadout|team|press|invite|ready|search", re.I)
+        c = load_career() or {}
+        hk = c.get("hunter_kills", {})
+        junk = [k for k in hk if bad.search(k) or looks_like_weapon(k)]
+        for k in junk:
+            hk.pop(k)
+        if junk:
+            CAREER_PATH.write_text(json.dumps(c, indent=2), encoding="utf-8")
+        changed = bool(junk)
+        for m in self.hist["matches"]:
+            hn = m.get("hunter")
+            if not hn:
+                continue
+            if bad.search(hn) or looks_like_weapon(hn):
+                m.pop("hunter")
+                changed = True
+            elif self.known_hunter(hn) != hn:
+                m["hunter"] = self.known_hunter(hn)
+                changed = True
+        if changed:
+            self._save()
+
+    def known_hunter(self, hunter: str) -> str:
+        """A hunter name as read, matched to one already known: a cut-off read ("Rose") is the
+        hunter it's the end or start of ("Desert Rose")."""
+        known = set((load_career() or {}).get("hunter_kills", {})) | {
+            m["hunter"] for m in self.hist["matches"] if m.get("hunter")}
+        hits = [k for k in known if k.lower().endswith(" " + hunter.lower()) or k.lower().startswith(hunter.lower() + " ")]
+        return hits[0] if len(hits) == 1 else hunter
+
+    def record_game_menu(self, players: list) -> None:
+        """The in-match Game Menu: your hunter and level for this match, and your squad if the loading
+        cards were missed (Hunt in the background, say)."""
+        if not self.hist["matches"]:
+            return
+        m, me = self.hist["matches"][-1], self._me()
+        for p in players:
+            if me and self._key(p["name"]) == me:
+                if p["hunter"]:
+                    self.record_ready_hunter(p["hunter"], p["full"], p["level"])
+                    if not m.get("hunter"):
+                        m["hunter"] = self.known_hunter(p["hunter"])
+                continue
+            if self._key(p["name"]) not in [self._key(n) for n in m["cards"]]:
+                m["cards"].append(p["name"])
+                pl = self._player(p["name"])
+                if m["key"] not in pl["matches"]:
+                    pl["matches"].append(m["key"])
+        if getattr(self, "capture_note", "").startswith("missed loading cards"):
+            self.capture_note = ""  # the squad came from the Game Menu instead
+        self.changed_at = time.time()
+        self._save()
+
+    def record_ready_hunter(self, hunter: str, full: str, level=None) -> None:
+        """The hunter on screen in the lobby. Switch, and the next read replaces it; the match found
+        next takes whatever was last read. Its level ("11 / 50") is kept per hunter."""
+        hunter = self.known_hunter(hunter)
         self.ready_hunter = {"hunter": hunter, "skin": full, "t": time.time()}
+        # The full name as the lobby shows it ("Desert Rose: Dust Devil"); OCR sometimes reads the ":" as ".".
+        rest = full[len(hunter):].lstrip(" .:") if full.lower().startswith(hunter.lower()) else ""
+        shown = f"{hunter}: {rest}" if rest else hunter
+        names = self.hist.setdefault("hunter_names", {})
+        if names.get(hunter) != shown:
+            names[hunter] = shown
+            self.changed_at = time.time()
+            self._save()
+        if level:
+            lv = self.hist.setdefault("hunter_levels", {})
+            if lv.get(hunter, [None, None])[:2] != list(level):
+                lv[hunter] = [level[0], level[1], time.time()]
+                self.changed_at = time.time()
+                self._save()
+
+    def full_hunter_name_row(self, row):
+        """(hunter, kills) -> (full name with skin, kills) for the kills row."""
+        return (self.hist.get("hunter_names", {}).get(row[0], row[0]), row[1]) if row else row
+
+    def current_hunter_level(self):
+        """(hunter, level, cap) for the hunter you're playing, from the last time the lobby showed it."""
+        cur = self.current_hunter_kills()
+        lv = self.hist.get("hunter_levels", {}).get(cur[0]) if cur else None
+        return (cur[0], lv[0], lv[1]) if lv else None
 
     def new_match(self) -> None:
         m = {"key": time.time(), "cards": [], "killers": []}
+        if (self.hist.get("wallet") or {}).get("spent"):
+            self.hist["wallet"]["spent"] = 0  # loaded into the match: the "-N spent" note is done
         rh = getattr(self, "ready_hunter", None)
         if rh and time.time() - rh["t"] < 30 * 60:  # read while searching for this match
             m["hunter"], m["hunter_skin"] = rh["hunter"], rh["skin"]
@@ -1947,7 +2207,15 @@ class Tracker:
         """Your real totals, read from the menu bar."""
         w = self.hist.get("wallet") or {}
         if (w.get("dollars"), w.get("bonds")) != (dollars, bonds) or time.time() - w.get("t", 0) > 600:
-            self.hist["wallet"] = {"dollars": dollars, "bonds": bonds, "t": time.time()}
+            # Spent in the menus (your loadout) since the last match: shown as "-N spent" until the
+            # next match loads. Selling something back takes it off again.
+            spent, was = w.get("spent", 0), w.get("dollars")
+            if was is not None and (self.cur or {}).get("state") in ("menu", "search", "found"):
+                if dollars < was:
+                    spent += was - dollars
+                elif dollars > was and spent:
+                    spent = max(0, spent - (dollars - was))
+            self.hist["wallet"] = {"dollars": dollars, "bonds": bonds, "t": time.time(), "spent": spent}
             if (w.get("dollars"), w.get("bonds")) != (dollars, bonds):
                 # Every change, with what the last match picked up and whether you died in it, to check
                 # whether a death loses the match's earnings.
@@ -1955,7 +2223,7 @@ class Tracker:
                 died = bool((self.cur or {}).get("hunts")) and (self.cur["hunts"][-1].get("deaths", 0) > 0)
                 self.hist["wallet_log"] = (self.hist.get("wallet_log", []) + [{
                     "t": time.time(), "dollars": dollars, "bonds": bonds, "was": [w.get("dollars"), w.get("bonds")],
-                    "earned": m.get("earned"), "died": died}])[-200:]
+                    "earned": m.get("earned"), "died": died}])[-3000:]  # the Hunt Dollars graph's history
             self.changed_at = time.time()
             self._save()
 
@@ -1978,11 +2246,12 @@ class Tracker:
         m = self.hist["matches"][-1] if self.hist["matches"] else {}
         e = m.get("earned") or {}
         if e and e.get("t", 0) > w.get("t", 0):
-            return w["dollars"], w["bonds"], e.get("dollars", 0), e.get("bonds", 0)
-        return w["dollars"], w["bonds"], 0, 0
+            return w["dollars"], w["bonds"], e.get("dollars", 0), e.get("bonds", 0), 0
+        return w["dollars"], w["bonds"], 0, 0, w.get("spent", 0)
 
     def record_summary_hunter(self, hunter: str) -> None:
         """The hunter you played this match, from the summary's Hunter Progress ("Desert Rose")."""
+        hunter = self.known_hunter(hunter) if hunter else hunter
         if self.hist["matches"] and hunter and self.hist["matches"][-1].get("hunter") != hunter:
             self.hist["matches"][-1]["hunter"] = hunter
             self.changed_at = time.time()
@@ -2296,8 +2565,10 @@ class Tracker:
             "ai_deaths": [a for mm in self.hist["matches"] for a in mm.get("ai_killers", [])],
             "career": load_career() or {"empty": True}, "page": self.cfg.get("page", "tracker"),
             "summary_kills": self.summary_kills(), "wallet": self.wallet_view(),
-            "hunter_kills": self.current_hunter_kills() or self.hunter_kills(),
-            "hunter_table": self.hunter_table(),
+            # Kills count per hunter; each is shown by its full name with the skin last seen in the lobby.
+            "hunter_kills": self.full_hunter_name_row(self.current_hunter_kills() or self.hunter_kills()),
+            "hunter_table": [(self.hist.get("hunter_names", {}).get(hn, hn), k, n) for hn, k, n in self.hunter_table()],
+            "hunter_level": self.current_hunter_level(),
             "hidden_families": self.cfg.get("hidden_families", []),
             "mmr": self.hist["mmr"][-1][1] if self.hist["mmr"] else None,
             "mmr_prev": self.hist["mmr"][-2][1] if len(self.hist["mmr"]) > 1 else None,
@@ -2334,7 +2605,7 @@ STAT_GRAPHS = {  # key: (title, "bar" or "line", how a value is written)
     "clash": ("Bounty Clash hunts per day", "bar", str),
     "sessions": ("Sessions per day", "bar", str),
     "busiest": ("Hunts per day (busiest in gold)", "bar", str),
-    "level": ("Hunter level", "line", lambda x: str(int(x))),
+    "dollars": ("Hunt Dollars", "line", lambda x: f"${int(x):,}"),
 }
 
 
@@ -2404,6 +2675,29 @@ def stat_series(t, key: str):
         if t.level and vals:
             vals[-1] = t.level
         out = [("level", gold, vals)]
+    elif key == "dollars":
+        # Hunt Dollars at the end of each day, from every reading of the menu bar (carried over days
+        # without one), plus what the hunts earned that day.
+        reads = sorted([[e["t"], e["dollars"]] for e in t.hist.get("wallet_log", [])]
+                       + [[a, d] for a, d, _b in t.hist.get("money_seed", [])])
+        if (t.hist.get("wallet") or {}).get("t"):
+            reads.append([t.hist["wallet"]["t"], t.hist["wallet"]["dollars"]])
+        if reads:  # starts at the first reading, not the first hunt in your logs
+            first2 = dt.date.fromtimestamp(reads[0][0])
+            days = [first2 + dt.timedelta(days=i) for i in range((dt.date.today() - first2).days + 1)]
+        vals, cur_v, i = [], None, 0
+        for d in days:
+            while i < len(reads) and dt.date.fromtimestamp(reads[i][0]) <= d:
+                cur_v, i = reads[i][1], i + 1
+            vals.append(cur_v)
+        earned = {}
+        for m in t.hist["matches"]:
+            e = m.get("earned") or {}
+            if e.get("dollars"):
+                day = dt.date.fromtimestamp(e.get("t", m["key"]))
+                earned[day] = earned.get(day, 0) + e["dollars"]
+        out = [("Hunt Dollars", gold, vals), ("earned in hunts", C["green"],
+                                              [earned.get(d) for d in days])]
     else:
         raise KeyError(key)
     return days, out, hi
@@ -2874,24 +3168,46 @@ def scene(v: dict, min_h: int = 0, W: int = 360, block_at=None, block: str = "de
         if v.get("hunter_kills"):
             hunter, n = v["hunter_kills"]
             rect(PAD - 4, y, W - PAD + 4, y + 32, C["panel"], C["inner"])
-            text(PAD + 6, y + 9, f"{hunter.upper()} KILLS", 12, C["brass"], bold=True)
+            lab = f"{hunter.upper()} KILLS"
+            room = W - 2 * PAD - 10 - len(f"{n:,}") * 10 - 12  # long skin names shrink to fit beside the number
+            size = 12
+            while size > 8 and len(lab) * size * 0.62 > room:
+                size -= 1
+            text(PAD + 6, y + 9 + (12 - size) // 2, lab, size, C["brass"], bold=True)
             text(W - PAD - 4, y + 6, f"{n:,}", 17, C["cream"], "end", bold=True, mono=True)
             y += 38
+        if v.get("hunter_level"):  # the hunter you're playing: "THE SCARECROW LEVEL   1 / 50"
+            hunter, lvl, cap = v["hunter_level"]
+            rect(PAD - 4, y, W - PAD + 4, y + 32, C["panel"], C["inner"])
+            level_col = "#d6cfa0"  # the pale gold of the game's level arrow
+            text(PAD + 6, y + 9, "HUNTER LEVEL", 12, level_col, bold=True)
+            val = f"{lvl} / {cap}"
+            text(W - PAD - 4, y + 6, val, 17, level_col, "end", bold=True, mono=True)
+            if icon_png("Hunter Level", 8):  # the game's level icon (icons/Hunter Level.png), like the lobby's
+                ops.append(("image", W - PAD - 4 - int(len(val) * 7.6) - 21, y + 8, "Hunter Level", 20))
+            y += 38
         if v.get("wallet"):
-            dollars, bonds, plus_d, plus_b = v["wallet"]
+            dollars, bonds, plus_d, plus_b, spent = v["wallet"]
             pending = plus_d or plus_b
-            hgt = 50 + (14 if pending else 0)
+            hgt = 50 + (14 if pending or spent else 0)
             rect(PAD - 4, y, W - PAD + 4, y + hgt, C["panel"], C["inner"])
-            half = (W - 2 * PAD) // 2
-            line(PAD + half, y + 8, PAD + half, y + hgt - 8, C["inner"])
-            for i, (lab, val, plus) in enumerate((("HUNT DOLLARS", dollars, plus_d), ("BLOOD BONDS", bonds, plus_b))):
-                cx = PAD + half * i + half // 2
-                text(cx, y + 8, lab, 10, C["dim"], "middle", bold=True)
-                # The total stays at what's banked; this match's pickup only counts if you extract,
-                # and the menu shows the real total after the match.
-                text(cx, y + 24, f"{val:,}", 17, C["cream"], "middle", bold=True, mono=True)
-                if pending:
-                    text(cx, y + 46, f"+{plus:,} if you extract", 10, C["green"], "middle")
+            cells_ = [("HUNT DOLLARS", f"{dollars:,}", plus_d), ("BLOOD BONDS", f"{bonds:,}", plus_b)]
+            part = (W - 2 * PAD) / len(cells_)
+            for i in range(1, len(cells_)):
+                line(int(PAD + part * i), y + 8, int(PAD + part * i), y + hgt - 8, C["inner"])
+            for i, (lab, val, plus) in enumerate(cells_):
+                cx = int(PAD + part * i + part / 2)
+                size = 10 if len(lab) * 7 < part - 8 else 9
+                text(cx, y + 8, lab, size, C["gold"] if plus is None else C["dim"], "middle", bold=True)
+                # The total stays at what the menu last showed; this hunt's pickup is kept whether or
+                # not you extract, and the menu shows the new total after the match.
+                text(cx, y + 24, val, 17, C["cream"], "middle", bold=True, mono=True)
+                if pending and plus is not None:
+                    text(cx, y + 46, f"+{plus:,} this hunt", 10, C["green"], "middle")
+                elif spent and lab == "HUNT DOLLARS":  # your loadout, until the match loads
+                    text(cx, y + 46, f"-{spent:,} spent", 10, C["red"], "middle")
+                if lab == "HUNT DOLLARS":  # click for its graph
+                    ops.append(("hot", int(PAD + part * i), y, int(PAD + part * (i + 1)), y + hgt, "dollars"))
             y += hgt + 6
         return y + 6
 
@@ -2938,7 +3254,6 @@ def scene(v: dict, min_h: int = 0, W: int = 360, block_at=None, block: str = "de
             ("Sessions", f"{v['sessions']}  ({v['per_session']:.1f} hunts each)" if v["per_session"] else "-",
              "sessions"),
             ("Busiest day", bus, "busiest"),
-            ("Hunter level", str(v["level"] or "-"), "level"),
         ])
         text(PAD, y + 2, "* no death screen shown = probably survived (estimate)", 10, C["dim"])
         text(PAD, y + 17, "click a stat to see its graph", 10, C["dim"])
@@ -3749,9 +4064,18 @@ def run_window(t: Tracker) -> None:
     canvas.bind("<Button-1>", on_click)
     root.bind("<Escape>", lambda e: close_graph() if st.get("graph") else close(e))
 
-    def graph_area():
-        """Where the graph pops out: over the Lifetime list, from its first row to its footnotes."""
-        zones = [z for z in getattr(canvas, "hot", []) if z[4] in STAT_GRAPHS]
+    def graph_area(anchor=None):
+        """Where the graph pops out: over the Lifetime list, from its first row to its footnotes; the
+        Hunt Dollars graph over the Hunt Dollars / Blood Bonds box and the rows under it."""
+        cw, ch = canvas.winfo_width(), canvas.winfo_height()
+        money = [z for z in getattr(canvas, "hot", []) if z[4] == "dollars"]
+        if anchor == "dollars" and money:
+            z = money[0]
+            x0, y0 = z[0], z[1]
+            x1 = min(cw, z[0] + 2 * (z[2] - z[0]))  # the whole Hunt Dollars | Blood Bonds row
+            hgt = min(ch - y0 - 4, max(z[3] - z[1], (x1 - x0) * 0.62))
+            return int(max(0, x0 - 4)), int(y0), int(x1 - x0 + 8), int(max(120, hgt))
+        zones = [z for z in getattr(canvas, "hot", []) if z[4] in STAT_GRAPHS and z[4] != "dollars"]
         if not zones:
             return None
         x0, x1 = min(z[0] for z in zones), max(z[2] for z in zones)
@@ -3767,9 +4091,10 @@ def run_window(t: Tracker) -> None:
             g["frame"].destroy()
 
     def place_graph():
-        g, area = st.get("graph"), graph_area()
+        g = st.get("graph")
         if not g:
             return
+        area = graph_area(g.get("anchor"))
         if not area:  # the Lifetime list isn't on screen any more (Career page, Detailed off)
             close_graph()
             return
@@ -3780,14 +4105,16 @@ def run_window(t: Tracker) -> None:
         """One lifetime stat drawn day by day, popped out over the Lifetime list. Hover a day to read
         its value; the arrows step through the other stats."""
         g = st.get("graph")
+        anchor = "dollars" if key == "dollars" else None  # where it opens; ◂ ▸ don't move it
         if g:
-            g["key"] = key
+            g["key"], g["anchor"] = key, anchor
+            place_graph()
             g["draw"]()
             return
         frame = tk.Frame(canvas, bg=C["blood"])
         cv = tk.Canvas(frame, bg=C["panel"], highlightthickness=0, bd=0)
         cv.pack(fill="both", expand=True, padx=1, pady=1)
-        g = {"key": key, "hover": None, "frame": frame, "unfold": 0.15}
+        g = {"key": key, "hover": None, "frame": frame, "unfold": 0.15, "anchor": anchor}
         st["graph"] = g
         keys = list(STAT_GRAPHS)
 
@@ -3840,13 +4167,13 @@ def run_window(t: Tracker) -> None:
                 sub += f"  \u00b7  total {fmt(sum(real))}  \u00b7  best day {fmt(max(real))}"
             elif real:
                 sub += f"  \u00b7  now {fmt(real[-1])}  \u00b7  high {fmt(max(real))}  \u00b7  low {fmt(min(real))}"
-            fit(cv.create_text(24, 6 + 18 * sc, text=sub, anchor="nw", fill=C["dim"], font=(TEXT_FONT, int(9 * sc))),
-                Wd - 8)
+            sub_it = cv.create_text(24, 6 + 18 * sc, text=sub, anchor="nw", fill=C["dim"], font=(TEXT_FONT, int(9 * sc)))
             lx = Wd - R
             for nm, col, _ in reversed(series) if len(series) > 1 else []:  # legend, in each line's colour
                 it = cv.create_text(lx, T - 14 * sc, text=f"\u25c6 {nm}", anchor="se", fill=col,
                                     font=(TEXT_FONT, int(9 * sc)))
                 lx = cv.bbox(it)[0] - 12
+            fit(sub_it, (lx - 4) if len(series) > 1 else Wd - 8)  # the summary stops short of the legend
 
             lo, top_v = 0, max(vals or [1])
             if key in ("level", "steam") and vals:  # these only climb: zoom in on the part that moved
@@ -3914,6 +4241,10 @@ def run_window(t: Tracker) -> None:
                                   anchor=anchor, fill=C["cream"], font=(TEXT_FONT, int(10 * g["sc"]), "bold"),
                                   tags="hover")
             bx = cv.bbox(item)
+            shift = max(0, 8 - bx[0]) - max(0, bx[2] - (g["Wd"] - 8))  # keep the label inside the graph
+            if shift:
+                cv.move(item, shift, 0)
+                bx = cv.bbox(item)
             cv.tag_lower(cv.create_rectangle(bx[0] - 5, bx[1] - 3, bx[2] + 5, bx[3] + 3, fill=C["bg"],
                                              outline=C["inner"], tags="hover"), item)
 
@@ -4113,11 +4444,9 @@ def run_window(t: Tracker) -> None:
         button(Wd - 20, y, "Stop sharing" if on else "Share my stats", lambda: lb_set_share(not on), "ne", 11,
                C["red"] if on else C["gold"])
         y += 30 * sc
-        label = LB_STATS[lb["stat"]][0]
-        bx = button(20, y, "◂", lambda: (lb.update(stat=(lb["stat"] - 1) % len(LB_STATS)), lb_draw()), size=14)
-        it = cv.create_text(bx[2] + 12, y + 2, text=label.upper(), anchor="nw", fill=C["gold"], font=F(13, True))
-        button(cv.bbox(it)[2] + 12, y, "▸", lambda: (lb.update(stat=(lb["stat"] + 1) % len(LB_STATS)), lb_draw()),
-               size=14)
+        label = "KDA"  # ranked by KDA (its column shows after K/D); a player's card has the rest
+        cv.create_text(20, y + 3, text="click a player to view more stats", anchor="nw", fill=C["dim"],
+                       font=F(11))
         button(Wd - 20, y + 2, "refresh", lb_refresh, "ne", 10, C["dim"])
         y += 34 * sc
         cv.create_line(20, y, Wd - 20, y, fill=C["blood"])
@@ -4351,6 +4680,17 @@ def main() -> None:
              "  D:\\Steam\\steamapps\\common\\Hunt Showdown 1896\\USER\\Game.log\n"
              "Put the full path in hunttracker.json as \"log_path\".")
     t = Tracker(cfg, log)
+    t.tidy_hunters()
+    seed = DATA / "money_seed.json"  # older Hunt Dollars readings to add to the money graph, once
+    if seed.exists():
+        try:
+            old = {round(r[0]) for r in t.hist.get("money_seed", [])}
+            t.hist.setdefault("money_seed", []).extend(
+                r for r in json.loads(seed.read_text(encoding="utf-8")) if round(r[0]) not in old)
+            t._save()
+            seed.unlink()
+        except (OSError, ValueError):
+            pass
     c = load_career()
     if c and c.get("profile_stats"):  # stats hovered in Profile > Statistic before they were shown
         merge_stats(list(c["profile_stats"].items()), picker=True, only_missing=True)

@@ -22,6 +22,22 @@ it and reopens. Your data is kept.
 Windows may warn that the app is from an unknown publisher the first time (it isn't code-signed):
 click **More info → Run anyway**.
 
+## What's new in 1.0.12
+
+- **Your hunter, live**: the hunter you pick in the lobby is read as soon as it shows (no need to
+  ready up), with its full name and skin ("Desert Rose: Dust Devil"), and a **Hunter Level** row
+  (with the game's level icon) sits under its kills.
+- **Hunt Dollars graph**: click Hunt Dollars for its history day by day, plus what your hunts earned.
+  Buying your loadout shows "−N spent" until the match loads; "+N this hunt" counts whether or not
+  you extract. Money is checked every second in the menus.
+- **Reads Hunt in the background**: if Hunt is showing on one monitor while you click around on
+  another, the tracker still reads it (only minimized or covered windows are skipped).
+- **Game Menu backup**: in a match, pressing Esc lets the tracker pick up your squad, hunter and level
+  from the Game Menu if it missed the loading cards.
+- **Better reading**: card titles ("Survivalist", "Bound by Blood"), hidden names, the prestige
+  badges and lobby buttons no longer get read as players or hunters.
+- **Leaderboard** ranks by KDA; click a player for their full card.
+
 ## What's new in 1.0.11
 
 - **Leaderboard**: share your Career stats (opt in or out any time) and see how you rank against

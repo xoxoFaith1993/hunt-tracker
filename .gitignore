@@ -21,3 +21,10 @@ installer/Output/
 installer/*.spec
 installer/icon.ico
 backups/
+restore_stage/
+restore*.txt
+
+# Local helper scripts for testing on this PC
+Copy Screen Log.bat
+Install Local Build.bat
+Restore Hunt Tracker Data.bat
