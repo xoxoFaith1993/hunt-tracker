@@ -46,6 +46,7 @@ DEFAULTS = {
     "port": 8765,
     "auto_update": True,      # the installed .exe updates itself from GitHub when it opens
     "hidden_families": [],    # weapon families hidden from the Career page (click its heading)
+    "hidden_types": [],       # weapon types hidden from the Career page (click its heading)
     "host": "127.0.0.1",     # "0.0.0.0" lets a phone/tablet on your Wi-Fi open it (no password!)
     "poll_seconds": 2,
     "window_scale": 1.0,      # old fixed scale; the window now just scales to its size
@@ -89,6 +90,7 @@ BASE_TYPES = ("Rifle", "Shotgun", "Revolver", "Pistol", "Melee", "Bow", "Crossbo
 # Weapon classes Hunt only lists as a family (own class icon, no matching "<type> Kills" stat).
 STANDALONE_FAMILIES = ("Crossbow",)
 FAMILY_HEAD = "KILLS BY WEAPON FAMILY \u25be"  # click it in the window to pick which families show
+TYPE_HEAD = "KILLS BY WEAPON TYPE \u25be"  # the same, for weapon types
 # Every weapon family, with the class icon used when it has no icon of its own.
 FAMILY_CLASS = {
     **{f: "Rifle" for f in ("1865 Carbine", "Berthier 1892", "Centennial", "Drilling", "Frontier 73C",
@@ -101,6 +103,37 @@ FAMILY_CLASS = {
     **{f: "Crossbow" for f in ("Crossbow", "Hunting Bow", "Chu Ko Nu")},
     "Bomb Lance": "Melee",
 }
+
+
+def canon_family(name: str) -> str:
+    """A family name as Hunt writes it, when OCR misread a look-alike letter ("Auto-S" is Auto-5)."""
+    if name in FAMILY_CLASS:
+        return name
+    k = player_key(name)
+    return next((f for f in FAMILY_CLASS if player_key(f) == k), name)
+
+
+def fix_family_names(c: dict) -> bool:
+    """Merge families (and profile "<family> Family Kills") saved under a misread name into the real
+    one, keeping the higher count. True if anything changed."""
+    changed = False
+    fams = c.get("weapon_families", {})
+    for k in [k for k in fams if canon_family(k) != k]:
+        real = canon_family(k)
+        fams[real] = max(fams.get(real, 0), fams.pop(k))
+        changed = True
+    prof = c.get("profile_stats", {})
+    for k in [k for k in prof if k.endswith(" Family Kills") and canon_family(k[:-13]) != k[:-13]]:
+        real = canon_family(k[:-13]) + " Family Kills"
+        v = prof.pop(k)
+        prof[real] = max(prof.get(real, 0), v) if isinstance(v, int) else v
+        changed = True
+    for k in [k for k in c.get("deltas", {}) if canon_family(k) != k and k[:-13] not in FAMILY_CLASS]:
+        c["deltas"].pop(k)
+        changed = True
+    if changed and "weapon_families" in c:
+        c["weapon_families"] = dict(sorted(c["weapon_families"].items(), key=lambda kv: -kv[1]))
+    return changed
 
 
 def family_of(name: str):
@@ -1076,7 +1109,7 @@ def merge_stats(rows: list, weapons_page: bool = False, picker: bool = False, on
             if not (only_missing and c.get("top_variant")):
                 c["top_variant"] = {"name": name, "n": val}
         elif label.endswith(" Family Kills"):
-            put("weapon_families", label[:-len(" Family Kills")], val)
+            put("weapon_families", canon_family(label[:-len(" Family Kills")]), val)
         elif label.endswith(" Kills") and (name.lower() in types or (weapons_page and name.lower() not in hunters)):
             put("weapon_types", name, val)
         elif label.endswith(" Kills") and not picker and isinstance(val, int) and re.fullmatch(r"[A-Z][\w'.-]+( [A-Z][\w'.-]+)?", name):
@@ -2554,6 +2587,14 @@ class Tracker:
     def _read(self, kind: str, data: dict, file: str) -> None:
         self.hist["reads"] = (self.hist["reads"] + [{"t": time.time(), "kind": kind, "file": file, **data}])[-20:]
 
+    def tidy_career(self) -> None:
+        """Weapon families saved under a misread name by earlier versions, merged into the real one."""
+        c = load_career()
+        if c and fix_family_names(c):
+            tmp = CAREER_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(c, indent=2), encoding="utf-8")
+            tmp.replace(CAREER_PATH)
+
     def tidy_players(self) -> None:
         """Players that were really screen text (once: the overlay's own panels, read as a squad page)."""
         junk = [k for k, p in self.hist["players"].items() if not_a_player(p.get("name", ""))]
@@ -2790,6 +2831,8 @@ class Tracker:
 
     def record_profile_stat(self, name: str, value) -> None:
         """A Player Profile card statistic (the hovered one in Profile > Statistic)."""
+        if name.endswith(" Family Kills"):
+            name = canon_family(name[:-len(" Family Kills")]) + " Family Kills"  # "Auto-S" is Auto-5
         c = load_career() or {}
         if name.startswith(HUNTER_MOST) and isinstance(value, int):
             # Your hunter with the most kills: the "<HUNTER> KILLS" row on the tracker. Matches after
@@ -3206,6 +3249,7 @@ class Tracker:
             # Your best single hunt: "Hunters Killed +N" from match summaries.
             "best_hunt": max((m["kills"] for m in self.hist["matches"] if m.get("kills")), default=None),
             "hidden_families": self.cfg.get("hidden_families", []),
+            "hidden_types": self.cfg.get("hidden_types", []),
             "mmr": self.hist["mmr"][-1][1] if self.hist["mmr"] else None,
             "mmr_prev": self.hist["mmr"][-2][1] if len(self.hist["mmr"]) > 1 else None,
             "mmr_at": self.hist["mmr"][-1][0] if self.hist["mmr"] else None,
@@ -3743,8 +3787,14 @@ def scene(v: dict, min_h: int = 0, W: int = 360, block_at=None, block: str = "de
         y = rows2(y, list(other.items()), deltas=dl) + 8
         types = dict(c.get("weapon_types", {}))
         types.update({k: 0 for k in CAREER_TYPES if k not in types})
-        y = section(y, "KILLS BY WEAPON TYPE")
-        y = rows2(y, list(types.items()), icons=True, deltas=dl) + 8
+        hidden_t = set(v.get("hidden_types") or [])
+        y = section(y, TYPE_HEAD)
+        shown_t = [(k, n) for k, n in types.items() if k not in hidden_t]
+        if shown_t:
+            y = rows2(y, shown_t, icons=True, deltas=dl) + 8
+        else:
+            text(PAD, y, "all hidden: click the heading to pick which to show", 11, C["dim"])
+            y += 24
         fams = c.get("weapon_families", {})
         hidden = set(v.get("hidden_families") or [])
         shown = [(k, n) for k, n in fams.items() if k not in hidden]
@@ -4187,7 +4237,7 @@ def draw_ops(canvas, W, H, ops, k=1.0) -> None:
             font = (NUM_FONT if mono else TEXT_FONT, -max(6, int(round(size * (1.12 if mono else 1.0) * k))),
                     "bold" if bold else "normal")
             canvas.create_text(x * k, y * k, text=t, font=font, fill=col, anchor=anchors[anchor],
-                               tags=("famhead",) if t == FAMILY_HEAD else ())
+                               tags=("famhead",) if t == FAMILY_HEAD else ("typehead",) if t == TYPE_HEAD else ())
 
 
 PAGE = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -4740,12 +4790,21 @@ def run_window(t: Tracker) -> None:
         if p is not None and p.winfo_exists():
             p.destroy()
 
-    def families_menu(e):
-        """A checklist that stays open while you tick families on and off (a Tk menu closes on every click)."""
+    def families_menu(e, kind="families"):
+        """A checklist that stays open while you tick weapon families (or types) on and off (a Tk menu
+        closes on every click)."""
         if st.get("fam_pop") is not None and st["fam_pop"].winfo_exists():
+            same = st.get("fam_kind") == kind
             close_families()  # clicking the heading again closes it
-            return
-        fams = (load_career() or {}).get("weapon_families", {})
+            if same:
+                return
+        st["fam_kind"] = kind
+        key = "hidden_types" if kind == "types" else "hidden_families"
+        if kind == "types":
+            fams = dict((load_career() or {}).get("weapon_types", {}))
+            fams.update({k: 0 for k in CAREER_TYPES if k not in fams})
+        else:
+            fams = (load_career() or {}).get("weapon_families", {})
         pop = tk.Toplevel(root, bg=C["blood"], padx=1, pady=1)
         pop.overrideredirect(True)
         pop.attributes("-topmost", True)
@@ -4757,14 +4816,14 @@ def run_window(t: Tracker) -> None:
         rows = {}
 
         def paint():
-            hidden = set(t.cfg.get("hidden_families") or [])
+            hidden = set(t.cfg.get(key) or [])
             for name, lab in rows.items():
                 on = name not in hidden
                 lab.configure(text=("◆ " if on else "◇ ") + lab.base,
                               fg=C["cream"] if on else "#6f6456")
 
         def set_hidden(new):
-            t.cfg["hidden_families"] = sorted(new)
+            t.cfg[key] = sorted(new)
             save_cfg()
             paint()
             redraw(force=True)
@@ -4793,7 +4852,7 @@ def run_window(t: Tracker) -> None:
                 lab.base = f"{name}  ({n:,})"
                 lab.grid(row=i % per_col, column=i // per_col, sticky="w", padx=(0, 14))
                 lab.bind("<Button-1>", lambda _e, name=name: set_hidden(
-                    set(t.cfg.get("hidden_families") or []) ^ {name}))
+                    set(t.cfg.get(key) or []) ^ {name}))
                 rows[name] = lab
             paint()
         pop.bind("<Escape>", close_families)
@@ -4809,7 +4868,7 @@ def run_window(t: Tracker) -> None:
         return next((z[4] for z in getattr(canvas, "hot", []) if z[0] <= x <= z[2] and z[1] <= y <= z[3]), None)
 
     def on_motion(e):
-        if canvas.find_withtag("current") and "famhead" in canvas.gettags("current"):
+        if canvas.find_withtag("current") and {"famhead", "typehead"} & set(canvas.gettags("current")):
             return
         canvas.configure(cursor="hand2" if hot_at(e.x, e.y) else "")
 
@@ -5042,6 +5101,9 @@ def run_window(t: Tracker) -> None:
     canvas.tag_bind("famhead", "<Button-1>", families_menu)
     canvas.tag_bind("famhead", "<Enter>", lambda e: canvas.configure(cursor="hand2"))
     canvas.tag_bind("famhead", "<Leave>", lambda e: canvas.configure(cursor=""))
+    canvas.tag_bind("typehead", "<Button-1>", lambda e: families_menu(e, "types"))
+    canvas.tag_bind("typehead", "<Enter>", lambda e: canvas.configure(cursor="hand2"))
+    canvas.tag_bind("typehead", "<Leave>", lambda e: canvas.configure(cursor=""))
     note = tk.Label(bar, bg="#0b0908", fg="#6f6456", font=(TEXT_FONT, 9), padx=12, text=f"v{VERSION}")
     note.pack(side="right", fill="y")
 
@@ -5971,6 +6033,7 @@ def main() -> None:
     t = Tracker(cfg, log)
     t.tidy_hunters()
     t.tidy_players()
+    t.tidy_career()
     seed = DATA / "money_seed.json"  # older Hunt Dollars readings to add to the money graph, once
     if seed.exists():
         try:
