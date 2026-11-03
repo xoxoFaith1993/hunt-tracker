@@ -1268,6 +1268,8 @@ def read_columns(words: list, height: int, px: bytes = b"", width: int = 0) -> l
         min(cols, key=lambda c: abs(c["x"] - x))["stats"][label] = val
     for c in cols:
         c["hidden"] = not c["stats"]  # the player set their stats to hidden
+        right = min([o["x"] for o in cols if o["x"] > c["x"]] + [c["x"] + nh * 10]) - nh // 2
+        c["badges"] = (c["x"] - nh // 2, ny + nh + 2, right, ny + int(nh * 3.1))  # prestige / rank row
     return sorted([c for c in cols if c["name"]], key=lambda c: c["x"])
 
 
@@ -1515,6 +1517,148 @@ def read_death(words: list, width: int, height: int, px: bytes = b"") -> dict:
 MISSION_LEFT = re.compile(r"ends\s*in\s*:?\s*(\d{1,2})\s*[:.]\s*(\d{2})", re.I)
 DIGITISH = str.maketrans({"O": "0", "o": "0", "D": "0", "Q": "0", "l": "1", "I": "1", "|": "1", "S": "5",
                           "s": "5", "B": "8", "Z": "2", "z": "2", ",": "", ".": ""})
+
+
+def read_badges(px: bytes, w: int, x0: int, y0: int, x1: int, y1: int):
+    """(prestige, rank) from the badges under a player's name on a card: a red medal and a red
+    number (prestige), then a white skull and a white number (rank). Plain OCR misses the red
+    number and reads the icons as digits, so each number is picked out by its colour (icons are
+    the first shape of each colour) and read on its own, white on black and enlarged."""
+    h = len(px) // (4 * w) if w else 0
+    x0, x1, y0, y1 = max(0, int(x0)), min(w, int(x1)), max(0, int(y0)), min(h, int(y1))
+    if x1 - x0 < 10 or y1 - y0 < 6:
+        return None
+
+    def kind(b, g, r):
+        if r >= 100 and r - max(g, b) >= 60:
+            return "red"
+        if min(r, g, b) >= 150 and max(r, g, b) - min(r, g, b) < 30:  # white, not the hunter's pale gold
+            return "white"
+        return None
+
+    def ink(b, g, r, colour):
+        """How strongly a pixel is that colour, 0-255 (keeps the digits' soft edges for OCR)."""
+        v = r - max(g, b) if colour == "red" else min(r, g, b)
+        return max(0, min(255, int((v - (25 if colour == "red" else 60)) * 2.2)))
+
+    cols = []  # per x: the colour most of that column's coloured pixels have (icons have grey edges)
+    for x in range(x0, x1):
+        n = {"red": 0, "white": 0}
+        for y in range(y0, y1):
+            i = (y * w + x) * 4
+            k = kind(px[i], px[i + 1], px[i + 2])
+            if k:
+                n[k] += 1
+        cols.append("red" if n["red"] >= 2 and n["red"] >= n["white"] else "white" if n["white"] >= 3 else None)
+    runs: list = []  # [colour, first x, last x], neighbours closer than 4px joined
+    for i, k in enumerate(cols):
+        if k is None:
+            continue
+        x = x0 + i
+        if runs and runs[-1][0] == k and x - runs[-1][2] <= 4:
+            runs[-1][2] = x
+        else:
+            runs.append([k, x, x])
+    reds = [r_ for r_ in runs if r_[0] == "red"]
+    whites = [r_ for r_ in runs if r_[0] == "white" and reds and r_[1] > reds[0][2]]
+    if len(reds) < 2 or len(whites) < 2:
+        return None
+    prestige_runs = [r_ for r_ in reds[1:] if r_[2] < whites[0][1]]
+    rank_runs = whites[1:]
+    if not prestige_runs or not rank_runs:
+        return None
+
+    def number(colour, a, b):
+        """The digits between x = a and b in one colour, as light on black, enlarged to about 48px
+        tall and shown three times (a lone short number is easily skipped by OCR): first a digit's
+        height apart, read as three numbers; if that finds nothing (a single digit alone is often
+        skipped too), side by side like "444" and split back into one."""
+        ys = [y for y in range(y0, y1) for x in range(a, b + 1)
+              if kind(*px[(y * w + x) * 4:(y * w + x) * 4 + 3]) == colour]
+        if not ys:
+            return None, None
+        top, bot = max(y0, min(ys) - 1), min(y1 - 1, max(ys) + 1)
+        a, b = max(x0, a - 1), min(x1 - 1, b + 1)
+        gw, gh = b - a + 1, bot - top + 1
+        k = max(3, round(80 / gh))  # about 80px tall: Windows OCR reads small digits best smooth and big
+        vals = [[ink(*px[((top + yy) * w + a + xx) * 4:((top + yy) * w + a + xx) * 4 + 3], colour)
+                 for xx in range(gw)] for yy in range(gh)]
+        peak = max(max(r_) for r_ in vals) or 1
+        vals = [[min(255, v * 255 // peak) for v in r_] for r_ in vals]  # faint red brought up to full
+        GW, GH = gw * k, gh * k
+        glyph = []  # the digits enlarged smoothly (bilinear): blocky pixels confuse OCR
+        for Y in range(GH):
+            fy = min(max((Y + 0.5) / k - 0.5, 0), gh - 1)
+            y_0 = int(fy)
+            y_1, ty = min(y_0 + 1, gh - 1), fy - int(fy)
+            row = bytearray()
+            for X in range(GW):
+                fx = min(max((X + 0.5) / k - 0.5, 0), gw - 1)
+                x_0 = int(fx)
+                x_1, tx = min(x_0 + 1, gw - 1), fx - int(fx)
+                v = ((vals[y_0][x_0] * (1 - tx) + vals[y_0][x_1] * tx) * (1 - ty)
+                     + (vals[y_1][x_0] * (1 - tx) + vals[y_1][x_1] * tx) * ty)
+                row += bytes((int(v), int(v), int(v), 255))
+            glyph.append(bytes(row))
+
+        def read(gap):
+            edge = GH // 2
+            one = GW + gap
+            W, H = one * 3 + 2 * edge, GH + 2 * edge
+            out = bytearray(bytes((0, 0, 0, 255)) * (W * H))  # solid black
+            for c in range(3):
+                for Y, row in enumerate(glyph):
+                    start = ((edge + Y) * W + edge + c * one) * 4
+                    out[start:start + len(row)] = row
+            return [q[4].translate(DIGITISH) for q in (ocr_pixels(W, H, bytes(out)) or [])]
+
+        # How many digits: separate shapes across the badge (a lone "4" is one, "55" is two).
+        lit = [any(vals[yy][xx] > 90 for yy in range(gh)) for xx in range(gw)]
+        digits = sum(1 for i, on in enumerate(lit) if on and (i == 0 or not lit[i - 1])) or 1
+
+        def one_number(txt):  # the three copies can come back as one number: "444" is 4
+            if len(txt) == 3 * digits and txt == txt[:digits] * 3:
+                return txt[:digits]
+            return txt if len(txt) == digits else None
+
+        reads = [one_number(r_) for r_ in read(GH) if r_.isdigit()]
+        reads = [r_ for r_ in reads if r_]
+        if not reads:
+            joined = one_number("".join(r_ for r_ in read(max(4, GH // 8)) if r_.isdigit()))
+            reads = [joined] if joined else []
+        value = int(max(set(reads), key=reads.count)) if reads else None
+        return value, (glyph, GW, GH, digits)
+
+    prestige, p_img = number("red", prestige_runs[0][1], prestige_runs[-1][2])
+    rank, r_img = number("white", rank_runs[0][1], rank_runs[-1][2])
+    if (prestige is None or rank is None) and p_img and r_img:
+        # Some numbers (a run of 1s) aren't read on their own at all: both side by side, three
+        # times ("11 100 11 100 11 100"), read as one line and taken back apart in order.
+        parts = [p_img, r_img] * 3
+        gap = max(p_img[2], r_img[2])
+        edge = gap // 2
+        W, H = sum(g_[1] for g_ in parts) + gap * (len(parts) - 1) + 2 * edge, gap + 2 * edge
+        out = bytearray(bytes((0, 0, 0, 255)) * (W * H))
+        x = edge
+        for glyph, GW, GH, _d in parts:
+            for Y, row in enumerate(glyph):
+                start = ((edge + (gap - GH) // 2 + Y) * W + x) * 4
+                out[start:start + len(row)] = row
+            x += GW + gap
+        words = [q[4].translate(DIGITISH) for q in (ocr_pixels(W, H, bytes(out)) or [])]
+        words = [w_ for w_ in words if w_.isdigit()]
+        if len(words) == 6:
+            ps, rs = words[0::2], words[1::2]
+        else:
+            ps = [w_ for w_ in words if len(w_) == p_img[3]]
+            rs = [w_ for w_ in words if len(w_) == r_img[3]] if r_img[3] != p_img[3] else []
+        if prestige is None and ps:
+            prestige = int(max(set(ps), key=ps.count))
+        if rank is None and rs:
+            rank = int(max(set(rs), key=rs.count))
+    if prestige is None or rank is None or not (0 <= prestige <= 999 and 1 <= rank <= 100):
+        return None
+    return prestige, rank
 
 
 def _ocr_number(png: Path, w: int, h: int, px: bytes, x0: int, y0: int, x1: int, y1: int):
@@ -1822,6 +1966,7 @@ def start_summary_capture(t: "Tracker") -> None:
                     cols = read_columns(lw, h, px, w)
                     if cols and max(len(c["stats"]) for c in cols) >= 5:
                         t.record_players(cols, "lobby", "")
+                        t.note_badges(cols, px, w)
                     continue
                 shots += 1
                 if summary or folder:
@@ -2347,6 +2492,25 @@ class Tracker:
                     m["cards"].append(c["name"])
         self.changed_at = time.time()
         self._save()
+
+    def note_badges(self, cols: list, px: bytes, w: int) -> None:
+        """Your prestige and rank from the badges under your name on the lobby's squad stats page
+        (loading cards don't show them), into your Career stats. Checked at most every 20 seconds."""
+        me = self._me()
+        mine = next((c for c in cols if c.get("badges") and self._key(c["name"]) == me), None)
+        if not mine or not px or time.time() - getattr(self, "_badges_at", 0) < 20:
+            return
+        self._badges_at = time.time()
+        got = read_badges(px, w, *mine["badges"])
+        if not got:
+            return
+        c = load_career() or {}
+        if (c.get("prestige"), c.get("rank")) != got:
+            c["prestige"], c["rank"] = got
+            tmp = CAREER_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(c, indent=2), encoding="utf-8")
+            tmp.replace(CAREER_PATH)
+            self.changed_at = time.time()
 
     def note_my_stats(self, stats: dict) -> None:
         """Your own column on the squad stats page (or your loading card) into your Career stats.

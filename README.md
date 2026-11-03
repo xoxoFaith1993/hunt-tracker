@@ -34,6 +34,7 @@ click **More info → Run anyway**.
 - **Tray icon** by the clock (Overlay / Windowed / Open / Quit), and a short "Hunt Tracker is running"
   note at the bottom of the screen when Hunt starts.
 - **Most kills in one hunt** has its own row.
+- **Prestige and rank** are read from your card on the lobby's squad page (the badges under your name).
 - **Career keeps counting**: your kills, deaths, K/D and KDA go up from your matches between visits to
   the Statistics page; opening Statistics confirms or corrects them.
 - **Barcode names**: players whose names show as boxes (letters Hunt's font can't draw) are kept on the
