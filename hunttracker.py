@@ -4310,9 +4310,18 @@ def _tail(path: Path, size: int) -> str:
         return ""
 
 
+def _db_keys(v):
+    """The same data with names the database accepts: no . $ # [ ] / in a key ("K/D" -> "K_D")."""
+    if isinstance(v, dict):
+        return {re.sub(r"[.$#\[\]/]", "_", str(k)): _db_keys(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_db_keys(x) for x in v]
+    return v
+
+
 def diag_report(t: "Tracker") -> dict:
-    """What's sent as diagnostics (see the terms): the tracker's setup, how its screen reading went
-    over the last week, its error logs, and the latest part of the screen text log."""
+    """What's sent as diagnostics (see the terms): the tracker's setup, your Career stats, how its
+    screen reading went over the last week, its error logs, and the latest part of the screen text log."""
     import platform
     setup = {"version": VERSION, "installed": bool(FROZEN), "windows": f"{platform.release()} {platform.version()}",
              "python": platform.python_version(), "ocr": "winrt" if _winrt_ocr() is not None else "powershell",
@@ -4350,8 +4359,15 @@ def diag_report(t: "Tracker") -> dict:
               "deaths_ai": sum(len(m.get("ai_killers") or []) for m in ms),
               "players": len(t.hist.get("players", {})), "note": getattr(t, "capture_note", "")}
     c = load_career() or {}
+    hunts = [h for s_ in t.hist.get("sessions", {}).values() for h in s_.get("hunts", [])]
+    known, _src, _extra = known_kills(c, t.summary_kills()) if c else (None, "", 0)
+    career = {k: c[k] for k in ("headline", "other", "weapon_types", "weapon_families", "hunter_kills",
+                                 "top_variant", "profile_stats", "prestige", "rank", "updated") if k in c}
+    career.update({"mmr": t.hist["mmr"][-1][1] if t.hist.get("mmr") else None, "total_known_kills": known,
+                   "best_hunt": max((m["kills"] for m in t.hist.get("matches", []) if m.get("kills")), default=None),
+                   "hunts_tracked": len(hunts), "hours_hunting": round(sum(h.get("d", 0) for h in hunts) / 3600, 1)})
     return {"t": int(time.time()), "v": VERSION, "name": str(t.cfg.get("player_name") or c.get("name") or "")[:40],
-            "setup": setup, "counts": counts,
+            "setup": setup, "counts": counts, "career": _db_keys(career),
             "logs": {"crash": _tail(DATA / "crash.log", 20000), "overlay": _tail(DATA / "overlay.log", 8000),
                      "capture": _tail(DATA / "capture_errors.log", 20000)},
             "screens": _tail(DATA / "screen_log.jsonl", 100000)}
@@ -5340,9 +5356,9 @@ def run_window(t: Tracker) -> None:
             t.cfg["diagnostics"] = ask(
                 "Hunt Tracker - Diagnostics",
                 "To find and fix problems, Hunt Tracker sends its developer a diagnostics report about once an "
-                "hour: its version and setup (Windows, screen size, display mode), how its screen reading went, "
-                "its error logs, and the text it recently read from Hunt's screens (which includes the names of "
-                "players on your loading cards and death screens). Nothing else is sent.\n\n"
+                "hour: its version and setup (Windows, screen size, display mode), your Career stats, how its "
+                "screen reading went, its error logs, and the text it recently read from Hunt's screens (which "
+                "includes the names of players on your loading cards and death screens). Nothing else is sent.\n\n"
                 "You can switch this off any time: right-click the tracker's icon by the clock.",
                 yes="OK, send them", no="Don't send")
             save_cfg()

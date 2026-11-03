@@ -28,6 +28,7 @@
         "name": { ".validate": "newData.isString() && newData.val().length <= 40" },
         "setup": { "$k": { ".validate": "!newData.isString() || newData.val().length <= 200" } },
         "counts": { "$k": { ".validate": "!newData.isString() || newData.val().length <= 300" } },
+        "career": { ".validate": "newData.hasChildren()" },
         "logs": { "$log": { ".validate": "newData.isString() && newData.val().length <= 25000" } },
         "screens": { ".validate": "newData.isString() && newData.val().length <= 120000" },
         "$other": { ".validate": false }

@@ -29,8 +29,10 @@ and installing Hunt Tracker, you agree to them.
    - Diagnostics: to find and fix problems, it sends the developer a
      diagnostics report about once an hour: the tracker's version and setup
      (Windows version, screen sizes, Hunt's display mode, overlay or window),
-     your player name, how its screen reading went over the last week (counts
-     only), its error logs, and the text it recently read from Hunt's screens.
+     your player name and Career stats (kills, deaths, K/D, prestige, rank,
+     weapon and hunter kills, MMR, hunts and hours tracked), how its screen
+     reading went over the last week (counts only), its error logs, and the
+     text it recently read from Hunt's screens.
      That text includes the names of other players shown on your loading
      cards, squad page and death screens. Reports can only be read by the
      developer. It asks once when it first starts; you can switch it off any

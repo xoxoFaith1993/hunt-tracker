@@ -186,8 +186,8 @@ Everything stays on your PC unless you choose to share on the leaderboard:
 
 The internet is only used for the update check against this repo's releases (turn it off with
 `"auto_update": false`), the leaderboard if you opt in, and **diagnostics**: about once an hour a
-report goes to the developer with the tracker's version and setup, how its screen reading went (counts
-only), its error logs and the text it recently read from Hunt's screens, which includes other players'
+report goes to the developer with the tracker's version and setup, your Career stats, how its screen
+reading went (counts only), its error logs and the text it recently read from Hunt's screens, which includes other players'
 names from your loading cards and death screens. Only the developer can read reports. The tracker asks
 once when it starts; switch it off any time by right-clicking its icon by the clock (**Send
 diagnostics**).

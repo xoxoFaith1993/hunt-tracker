@@ -54,8 +54,8 @@ GOOD TO KNOW
   Overlay.
 - Resize it by dragging its edges (or maximize it); everything scales to fit.
 - Your data is kept in %LOCALAPPDATA%\HuntTracker (paste that into the Explorer address bar).
-- Diagnostics: about once an hour it sends the developer a report (setup, error logs, what it
-  recently read from Hunt's screens) to help fix problems. Right-click the icon by the clock and
+- Diagnostics: about once an hour it sends the developer a report (setup, your Career stats, error
+  logs, what it recently read from Hunt's screens) to help fix problems. Right-click the icon by the clock and
   untick "Send diagnostics" to stop.
 - It updates itself: when a new version is out, it downloads it as it opens and restarts
   a few seconds later (the version number is at the top right). Your data is kept.
