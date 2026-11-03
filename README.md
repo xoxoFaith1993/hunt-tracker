@@ -1,11 +1,11 @@
 # Hunt Tracker
 
-A live stats window for **Hunt: Showdown 1896**. Put it on your second monitor and it fills itself in
-while you play: what you're doing right now, your hunts and hours, your career stats, weapon and
-hunter kills, MMR, the players you keep running into, and a leaderboard with your friends.
-You don't press or type anything.
+Live stats for **Hunt: Showdown 1896**, as an overlay over the game (press **End**) or a window on
+your second monitor. It fills itself in while you play: what you're doing right now, your hunts and
+hours, your career stats, weapon and hunter kills, MMR, the players you keep running into, and a
+leaderboard with your friends. You don't type anything.
 
-![The tracker window](docs/tracker.png)
+![The overlay over Hunt](docs/overlay.png)
 
 > Unofficial fan project. Not made, endorsed or supported by Crytek, Steam or Valve.
 > It never touches the game: no memory reading, no injection, no changes to game files.
@@ -21,6 +21,25 @@ it and reopens. Your data is kept.
 
 Windows may warn that the app is from an unknown publisher the first time (it isn't code-signed):
 click **More info → Run anyway**.
+
+## What's new in 1.0.13
+
+- **Overlay**: press **End** in Hunt and the tracker comes up over the game: the game dims and the
+  panels (Hunt Tracker, Hunt Log, Career, Player Summary) sit on top, with a bar of toggles across the
+  top. Drag a panel by its top strip and it stays there. **End**, **Esc** or a click on the dimmed game
+  takes you straight back. While it's open your clicks stay in the overlay and never reach the game.
+- **Overlay or window, your choice**: the **OVERLAY** button, or right-clicking the tracker's icon by
+  the clock, switches between the overlay and a normal window for a second monitor. It remembers your
+  pick; overlay is the default.
+- **Tray icon** by the clock (Overlay / Windowed / Open / Quit), and a short "Hunt Tracker is running"
+  note at the bottom of the screen when Hunt starts.
+- **Most kills in one hunt** has its own row.
+- **Career keeps counting**: your kills, deaths, K/D and KDA go up from your matches between visits to
+  the Statistics page; opening Statistics confirms or corrects them.
+- **Barcode names**: players whose names show as boxes (letters Hunt's font can't draw) are kept on the
+  loading cards, Team Details and death screens. One unreadable name used to lose every card.
+- Fixes: after a long post-match screen the lobby and squad page stopped being read until the next
+  hunt; card titles ("Outlaw", "Survivalist") are no longer kept as players.
 
 ## What's new in 1.0.12
 
@@ -57,13 +76,25 @@ click **More info → Run anyway**.
 - Labels shrink to fit narrow or vertical windows; the ON TOP toggle is gone (it's meant for a
   second monitor).
 
+## Overlay or window
+
+- **Overlay** (the default): nothing on your screen until you press **End** in Hunt. The tracker's
+  window stays hidden; its icon sits by the clock.
+- **Window**: a normal window you can leave open on a second monitor, like before. End is left to the
+  game.
+
+Switch with the **OVERLAY** button at the top, or right-click the icon by the clock and pick
+**Overlay** or **Windowed**.
+
+![The tracker window](docs/tracker.png)
+
 ## What it tracks
 
 **Right now**
 - Whether you're in the menus, searching, loading in, in a hunt or on the post-match screen
 - In a hunt: the time left on the mission (an estimate until you hold Tab, then synced to the map's timer)
 - Your MMR stars (from Team Details after a match), and whether they went up or down
-- Total known kills, kills and level of the hunter you're playing (full name and skin)
+- Total known kills, kills and level of the hunter you're playing (full name and skin), most kills in one hunt
 - Hunt Dollars and Blood Bonds: "+N this hunt" during a match, "−N spent" while you buy your loadout;
   click Hunt Dollars for its graph
 
@@ -81,7 +112,8 @@ click **More info → Run anyway**.
 ![A lifetime stat's graph](docs/graph.png)
 
 **Career** (read from your in-game Statistics page, squad screen and profile card)
-- Kills, deaths, assists, K/D, KDA, wipes, headshots, bounty, monsters, bosses, furthest kill
+- Kills, deaths, assists, K/D, KDA, wipes, headshots, bounty, monsters, bosses, furthest kill; kills
+  and deaths keep counting from your matches (green +N) until Statistics is opened again
 - Kills by weapon type (rifle, shotgun, sniper, silencer…) and by weapon family (Crossbow, Krag,
   Vetterli 71…), plus your variant with the most kills
 - Kills by hunter, for every hunter you've played
@@ -124,14 +156,19 @@ tracker gathers them from two places:
    start searching, load into a match or return to the lobby. The tracker reads those lines to
    know what you're doing and how long each hunt and queue took. It also reads older logs once,
    so your history starts before you installed it.
-2. **The screen, only while Hunt is the active window.** On specific screens (the lobby while
-   you're readied up, loading cards, the squad screen, death screens, the post-match summary,
-   Team Details, the Statistics pages and the map timer) it grabs the screen and reads the text
-   with **Windows' built-in text recognition** (`Windows.Media.Ocr`), straight from memory.
-   What it read is kept as text; no image is saved.
+2. **The screen, only while Hunt is showing.** On specific screens (the lobby, loading cards, the
+   squad screen, death screens, the post-match summary, Team Details, the Statistics pages and the
+   map timer) it grabs the screen and reads the text with **Windows' built-in text recognition**
+   (`Windows.Media.Ocr`), straight from memory. What it read is kept as text; no image is saved.
+   Reading pauses while the overlay is open.
 
 Steam's all-time playtime comes from Steam's own `localconfig.vdf`. No game memory, no network
 traffic to or from the game, no input sent to the game.
+
+Hunt reads the mouse even when another window is in front, so while the overlay is open the tracker
+uses a standard Windows mouse/keyboard hook (the kind push-to-talk apps use) to keep your clicks,
+the scroll wheel and Esc on Hunt's screen out of the game. It's only there while the overlay is
+open and is removed the moment it closes.
 
 ## Your data
 

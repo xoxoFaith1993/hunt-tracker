@@ -9,12 +9,15 @@ and installing Hunt Tracker, you agree to them.
 
 2. WHAT IT DOES ON YOUR PC
    - It reads Hunt's own log file (Game.log) to know when you are in a match.
-   - While Hunt is the active window, it takes screenshots of certain screens
+   - While Hunt is showing, it takes screenshots of certain screens
      (loading cards, death screens, post-match summary, Team Details, your
      Statistics page and the map timer) and reads the text on them with
      Windows' built-in text recognition.
    - It checks whether the Tab key is held down during a hunt, to read the
-     map's timer.
+     map's timer, and listens for the End key, which opens the overlay.
+   - Only while the overlay is open, it keeps your mouse clicks, scroll wheel
+     and Esc on Hunt's screen from reaching the game (a standard Windows
+     keyboard/mouse hook), so clicking the overlay doesn't click in the game.
    - It saves what it reads (stats, player names, MMR stars, and the text of
      those screens; not the images) in your user folder:
      %LOCALAPPDATA%\HuntTracker

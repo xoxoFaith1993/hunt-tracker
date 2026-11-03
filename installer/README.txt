@@ -1,12 +1,27 @@
 HUNT TRACKER
 ============
-A small window that sits next to Hunt: Showdown 1896 (put it on your second monitor) and fills
-itself in while you play. You don't have to press or type anything.
+Live stats for Hunt: Showdown 1896: an overlay over the game (press End), or a window you can keep
+on a second monitor. It fills itself in while you play. You don't have to type anything.
 
 STARTING IT
 - If you ticked "Open automatically whenever Hunt starts" during setup, just launch Hunt.
+  "Hunt Tracker is running" shows at the bottom of the screen for a moment.
 - Otherwise use the "Hunt Tracker" shortcut in the Start menu (or on your desktop).
-- Move the window where you want it; it remembers the spot.
+- Its icon sits by the clock (maybe under the ^ arrow). Right-click it for Overlay / Windowed /
+  Open / Quit.
+
+OVERLAY (the default)
+- Press End in Hunt: the game dims and the tracker's panels show on top. End, Esc or a click on the
+  dimmed game goes back to Hunt. While it's open your clicks stay in the overlay, not the game.
+- Drag a panel by its top strip; it stays where you put it. The bar along the top shows or hides
+  panels, opens the Leaderboard, and OVERLAY switches to a normal window.
+- Prefer a window on a second monitor? Click OVERLAY (or right-click the icon > Windowed). It
+  remembers your choice.
+
+NEW IN 1.0.13
+- The overlay (above), the icon by the clock, and the "running" note when Hunt starts.
+- Most kills in one hunt; Career kills and deaths keep counting between visits to Statistics.
+- Players whose names show as boxes are kept instead of dropped.
 
 NEW IN 1.0.11
 - LEADERBOARD at the top: share your Career stats (it asks first; change it any time) and see
@@ -32,9 +47,11 @@ Right side: Player Summary
 - After a match, open Team Details on the summary and scroll down: that saves everyone's MMR.
 
 GOOD TO KNOW
-- It only reads the screen while Hunt is the active window; it never touches the game.
+- It only reads the screen while Hunt is showing (and not while the overlay is open); it never
+  touches the game.
 - The first time it sees your loading cards it learns your name from the middle card (yours).
-- The toggles along the top of the window switch: Career, Player summary, Detailed, Leaderboard.
+- The toggles along the top of the window switch: Career, Player summary, Hunt log, Leaderboard,
+  Overlay.
 - Resize it by dragging its edges (or maximize it); everything scales to fit.
 - Your data is kept in %LOCALAPPDATA%\HuntTracker (paste that into the Explorer address bar).
 - It updates itself: when a new version is out, it downloads it as it opens and restarts

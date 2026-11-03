@@ -31,7 +31,7 @@ from xml.sax.saxutils import escape
 
 FROZEN = getattr(sys, "frozen", False)  # the installed .exe
 # "Publish Update.bat" bumps this and uploads the build; installed copies update themselves to it.
-VERSION = "1.0.12"
+VERSION = "1.0.13"
 UPDATE_REPO = "xoxoFaith1993/hunt-tracker"
 # A one-file .exe unpacks to a temp folder that __file__ points into; the install folder is the exe's.
 HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
@@ -50,11 +50,18 @@ DEFAULTS = {
     "poll_seconds": 2,
     "window_scale": 1.0,      # old fixed scale; the window now just scales to its size
     "always_on_top": False,   # (no longer shown: the tracker lives on a second monitor)
-    "detailed": True,         # detailed stats view (DETAILED at the top)
+    "detailed": True,         # detailed stats view (HUNT LOG at the top)
     "min_hunt_seconds": 120,  # ignore "hunts" shorter than this (e.g. instant disconnects)
     "quick_leave_seconds": 300,
     # Hunt doesn't save kills anywhere, so you count them with global hotkeys (work while the game has focus).
     # Deaths are counted automatically from death screens; the death keys are only for fixing mistakes.
+    # Opens the overlay over Hunt: the game dimmed, the tracker's panels on top. Again (or Esc) closes it.
+    # Hunt reads the keyboard directly, so it sees the key too: it must be one Hunt doesn't use.
+    "overlay_key": "End",
+    # The OVERLAY button, remembered: on, the window stays hidden and the key combo opens the overlay;
+    # off, the tracker is a normal window (say on a second monitor) and the game keeps the key.
+    "overlay_mode": True,
+    "overlay_dim": 0.55,      # how dark the game gets behind the overlay (0 = not at all, 1 = black)
     "kill_key": "F9",
     "undo_kill_key": "F10",
     "death_key": "F7",
@@ -120,6 +127,26 @@ def known_kills(c: dict, extra: int = 0):
     else:
         src = "weapon families"
     return max(by_type, by_family) + extra, src, extra
+
+
+def apply_live(c: dict, kills: int, deaths: int) -> dict:
+    """Career numbers plus what's happened since Statistics was last read (kills from match
+    summaries, deaths from death screens), with K/D and KDA worked out again the game's way:
+    K/D = kills / deaths, KDA = (kills + assists) / deaths. c["live"] says how much was added."""
+    hd = (c or {}).get("headline", {})
+    if "Players Killed" not in hd or not (kills or deaths):
+        return c
+    c = json.loads(json.dumps(c))
+    hd = c["headline"]
+    k = hd["Players Killed"] = hd["Players Killed"] + kills
+    if "Killed by Player" in hd:
+        d = hd["Killed by Player"] = hd["Killed by Player"] + deaths
+        if d:
+            hd["K/D"] = round(k / d, 2)
+            if "Kill Assists" in hd:
+                hd["KDA"] = round((k + hd["Kill Assists"]) / d, 2)
+    c["live"] = {"Players Killed": kills, "Killed by Player": deaths if "Killed by Player" in hd else 0}
+    return c
 
 
 def read_lobby_hunter(words: list, w: int, h: int, px: bytes = b""):
@@ -275,6 +302,8 @@ def load_config() -> dict:
     if CONFIG_PATH.exists():
         try:
             cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+            if cfg.get("overlay_key") in ("Alt+F", "Home"):  # earlier defaults (Hunt took Alt+F's F as "ready up")
+                cfg["overlay_key"] = "End"
         except (OSError, ValueError) as e:
             print(f"Couldn't read {CONFIG_PATH.name} ({e}); using defaults.")
     else:
@@ -1060,6 +1089,12 @@ def merge_stats(rows: list, weapons_page: bool = False, picker: bool = False, on
     for k in ("other", "weapon_types", "weapon_families"):
         if k in c:
             c[k] = dict(sorted(c[k].items(), key=lambda kv: -kv[1]))
+    # The K/D tooltip's exact counts were read: tracked kills and deaths count again from now, even when
+    # nothing changed (a tracked death the game didn't count is dropped this way).
+    tooltip = any(HEADLINE.get(re.sub(r"\s*/\s*", "/", lb)) in ("Players Killed", "Killed by Player")
+                  for lb, _ in rows)
+    if tooltip and time.time() - c.get("kills_at", 0) > 30:
+        c["kills_at"] = time.time()
     if json.dumps(c, sort_keys=True) == before:
         return False
     old = json.loads(before)
@@ -1108,9 +1143,10 @@ STAT_WORDS = re.compile(r"\b(kills?|killed|bounty|wiped|headshots|deaths|distanc
                         r"gauntlet|maxed-out)\b", re.I)
 
 
-def read_columns(words: list, height: int) -> list:
+def read_columns(words: list, height: int, px: bytes = b"", width: int = 0) -> list:
     """Side-by-side player columns (loading cards, or the lobby's squad stats):
     names in the top row, each player's "label ... number" stats below.
+    With the screen's pixels, a barcode name is kept as its boxes ("▮▮▮▮▮▮▮▮").
     -> [{"name", "stats", "x"}], left to right."""
     words = [w for w in words if w[1] < height * 0.86 and re.search("[0-9A-Za-z]", w[4])]  # no bottom status text
     lines = ocr_lines(words)
@@ -1184,24 +1220,41 @@ def read_columns(words: list, height: int) -> list:
             # Every name on this row, including players whose stats are hidden (they have no column).
             names = [s for s in segs if len(" ".join(q[4] for q in s)) >= 2]
             break
-    # No row with a name over every card: someone's name is hidden (streamer mode). Then the names are
-    # the row right above the prestige / rank numbers ("10 10 10"), with a gap where the hidden one is.
+    # No row with a name over every card: someone's name is hidden (streamer mode) or unreadable (a
+    # barcode name). Then the names are the row right above the prestige / rank numbers ("10 10 10"),
+    # with a gap where the missing one is. The badges can read as junk ("eStc-") instead of numbers,
+    # so short junk rows and the title row may also sit between the names and the stats.
+    def badge_row(j):
+        return (all(NUM.match(q[4]) for q in lines[j])
+                or len(re.sub("[^0-9A-Za-z]", "", " ".join(q[4] for q in lines[j]))) <= 6)
+
     for k, ws in enumerate(lines[:-1]) if names is None else []:
         if ws[0][1] >= top_y:
             break
         segs = [sg for sg in segments(ws) if len(re.sub("[^0-9A-Za-z]", "", " ".join(q[4] for q in sg))) >= 3]
+        below = range(k + 1, first_stat)
         if (segs and not title_row(k, segs) and not any(is_num(sg) for sg in segs)
-                and all(NUM.match(q[4]) for q in lines[k + 1])
+                and (all(NUM.match(q[4]) for q in lines[k + 1])
+                     or (len(below) >= 2 and badge_row(k + 1)
+                         and all(badge_row(j) or title_row(j, segments(lines[j])) for j in below)))
                 and max(1, len(col_x) - 1) <= len(segs) <= len(col_x)
                 and all(any(abs(sg[0][0] - cx) < slack for cx in col_x) for sg in segs)):
             names = segs  # the lowest such row (closest to the cards) wins over the menu bar
     if not names:
         return []
-    cols = [{"name": trim_name(s), "x": s[0][0], "stats": {}} for s in names]
-    # A column of stats with no name over it: a hidden name. Its stats stay with it, not a neighbour.
+    ny, nh = names[0][0][1], names[0][0][3]
+    band = (ny - nh // 2, ny + nh * 3 // 2)  # where a name's letters (or a barcode's boxes) sit
+    cols = []
+    for s in names:
+        name = trim_name(s)
+        if px and BARCODE_JUNK.match(name):  # OCR's reading of the boxes ("uuuuuuuu")
+            name = barcode_at(px, width, s[0][0] - nh, s[-1][0] + s[-1][2] + nh, *band) or name
+        cols.append({"name": name, "x": s[0][0], "stats": {}})
+    # A column of stats with no name over it: a hidden or barcode name. Its stats stay with it.
     for cx in col_x:
         if not any(abs(c["x"] - cx) < slack for c in cols):
-            cols.append({"name": "", "x": cx, "stats": {}})
+            right = min([c["x"] for c in cols if c["x"] > cx] + [cx + 3 * slack]) - nh
+            cols.append({"name": barcode_at(px, width, cx - slack, right, *band), "x": cx, "stats": {}})
     name_y = names[0][0][1] + names[0][0][3]
     # Lobby: under the names comes a row of prestige / rank numbers, then the hunter row ("Lilith 0"),
     # which looks like a stat. Cards have badge numbers there and a title row with no numbers instead.
@@ -1226,8 +1279,70 @@ def player_key(name: str) -> str:
     "Lic Fede777" and "MikkoBellic" as "Mikk0Be11ic", so spacing, symbols, accents and look-alike
     characters don't count."""
     import unicodedata
+    if is_barcode(name):
+        return f"barcode{len(name)}"
     plain = unicodedata.normalize("NFKD", name.lower()).encode("ascii", "ignore").decode()
     return re.sub(r"[^0-9a-z]", "", plain.translate(LOOKALIKE))
+
+
+# A name in characters Hunt's font can't draw shows as a row of white boxes ("barcode" names).
+# OCR reads nothing there, or "uuuuuuuu", so the boxes are counted from the pixels instead.
+BOX = "▮"
+BARCODE_JUNK = re.compile(r"^[uUnNIl1|!\[\]()oO0DmMwW\s]{3,}$")
+
+
+def is_barcode(name: str) -> bool:
+    return bool(name) and set(name) == {BOX}
+
+
+def count_bars(px: bytes, w: int, x0: int, x1: int, y0: int, y1: int) -> int:
+    """How many boxes a barcode name has: white boxes of one size, evenly spaced, in a box on screen.
+    Each pixel row through them crosses them as equal runs with equal gaps, so it's counted row by
+    row (an icon above or a bright scene behind only spoils some rows). The biggest count that
+    enough rows agree on (a box is taller than it is wide) wins. 0 when there's none (3 at least)."""
+    if not px or w <= 0:
+        return 0
+    h = len(px) // (4 * w)
+    x0, x1, y0, y1 = max(0, int(x0)), min(w, int(x1)), max(0, int(y0)), min(h, int(y1))
+    if x1 - x0 < 6 or y1 - y0 < 6:
+        return 0
+    rows = []  # per pixel row: (boxes, where the first one starts, box width), or None
+    for y in range(y0, y1):
+        runs, start, base = [], None, y * w * 4
+        for x in range(x0, x1 + 1):
+            i = base + x * 4
+            lit = x < x1 and px[i] > 140 and px[i + 1] > 140 and px[i + 2] > 140
+            if lit and start is None:
+                start = x
+            elif not lit and start is not None:
+                runs.append((start, x - start))
+                start = None
+        best, sig, run, gap, first = 1, None, 1, None, 0
+        for k, (a, b) in enumerate(zip(runs, runs[1:])):
+            g = b[0] - (a[0] + a[1])
+            if (a[1] >= 3 and abs(b[1] - a[1]) <= max(1, a[1] // 4) and 0 < g <= 1.5 * a[1] + 1  # boxes: gaps about as wide as a box
+                    and (gap is None or abs(g - gap) <= max(2, gap * 0.3))):
+                run, gap = run + 1, (g if gap is None else gap)
+            else:
+                run, gap, first = 1, None, k + 1
+            if run > best:
+                best, sig = run, (run, runs[first][0], a[1])
+        rows.append(sig if best >= 3 else None)
+    # (Letter stems in a name are evenly spaced too, but thin, with gaps 2-3 times their width.)
+    # Boxes are solid: the same boxes in the same place, row after row. Letters change every row.
+    found, streak = 0, 0
+    for prev, cur in zip([None] + rows, rows):
+        same = cur and prev and cur[0] == prev[0] and abs(cur[1] - prev[1]) <= 1
+        streak = streak + 1 if same else (1 if cur else 0)
+        if cur and streak >= max(5, cur[2]):
+            found = max(found, cur[0])
+    return found
+
+
+def barcode_at(px: bytes, w: int, x0: int, x1: int, y0: int, y1: int) -> str:
+    """A barcode name in a box, as that many boxes ("▮▮▮▮▮▮▮▮"), or ""."""
+    n = count_bars(px, w, x0, x1, y0, y1)
+    return BOX * n if n else ""
 
 
 def count_stars(px: bytes, w: int, x0: int, x1: int, y0: int, y1: int):
@@ -1275,7 +1390,10 @@ def read_team_details(words: list, w: int, h: int, px: bytes) -> list:
         if not mmr:
             continue
         name = trim_name([q for q in ln if q[0] + q[2] < mmr[0] - 20])
-        if len(name) < 2 or mmr[1] + 2 * mmr[3] > h or HIDDEN_NAME.search(name):
+        if len(name) < 2 or BARCODE_JUNK.match(name):  # nothing read: maybe a barcode name's boxes
+            x0 = min([x for x in names_x if x < mmr[0] - 20] + [mmr[0] - int(w * 0.3)]) - mmr[3]
+            name = barcode_at(px, w, x0, mmr[0] - 10, mmr[1] - mmr[3] // 2, mmr[1] + mmr[3] * 3 // 2) or name
+        if not is_barcode(name) and (len(name) < 2 or HIDDEN_NAME.search(name)) or mmr[1] + 2 * mmr[3] > h:
             continue  # only players whose name is actually shown
         sx = mmr[0] + mmr[2] + 4
         filled, total = count_stars(px, w, sx, sx + int(w * 0.11), mmr[1] - mmr[3] // 3, mmr[1] + mmr[3] + mmr[3] // 3)
@@ -1306,7 +1424,7 @@ DEATH_SKIP = re.compile(r"hide|show|revive|profile|player names|spectate|back to
 NOT_PLAYERS = {"achievements", "bound by blood", "statistics", "steam settings", "searching", "game", "earned",
                "push-to-talk", "push-to-mute", "settings", "loading", "ready", "invite", "new recruit",
                "seasoned hunter", "the prestigious", "meathead master", "outlaw", "butcher's bully", "mutant scum",
-               "survivalist"}
+               "survivalist", "hunt tracker", "hunt log", "career", "player summary", "leaderboard"}
 
 
 def not_a_player(name: str) -> bool:
@@ -1314,7 +1432,8 @@ def not_a_player(name: str) -> bool:
     n = re.sub(r"\s+", " ", name or "").strip().lower()
     return (n in NOT_PLAYERS or n.startswith("push-") or n.startswith("game re")
             or re.fullmatch(r"\w+ kills?", n) is not None
-            or re.search(r"achievement|steam|back to game|in game|\bclip\b|settings|earned", n) is not None)
+            or re.search(r"achievement|steam|back to game|in game|\bclip\b|settings|earned", n) is not None
+            or re.fullmatch(r"log \d+[smh]? ago", n) is not None)  # the tracker's own "log 86s ago"
 
 
 def number_plate(name: str) -> bool:
@@ -1334,7 +1453,7 @@ def _clean(txt: str) -> str:
     return re.sub(r"^[^0-9A-Za-z\[(]+|[^0-9A-Za-z_\])]+$", "", txt).strip()
 
 
-def read_death(words: list, width: int, height: int) -> dict:
+def read_death(words: list, width: int, height: int, px: bytes = b"") -> dict:
     """A death screen -> {"killer", "hunter", "weapon", "dist", "lines"}.
     Right side: "Killed by" and the killer's hunter near the top, the killer's player name low down
     (about 3/4 of the way, over their prestige / rank). Left side: "Killed with" and the weapon."""
@@ -1379,6 +1498,8 @@ def read_death(words: list, width: int, height: int) -> dict:
         killer = None  # anything read in the name-plate spot is a voice-chat bubble, not a killer
     else:
         ai = None
+        if (not killer or BARCODE_JUNK.match(killer)) and hunter and px:  # no name read: a barcode name?
+            killer = barcode_at(px, width, int(width * 0.72), width, int(height * 0.71), int(height * 0.83)) or killer
     dist = None
     for i, txt in enumerate(lines):  # "Distance to killer:" with the "8m" on the same line or just under it
         if re.search(r"distance\s*to\s*killer", txt, re.I):
@@ -1624,6 +1745,9 @@ def start_summary_capture(t: "Tracker") -> None:
         was = {"cards": False, "death": False}
         while True:
             time.sleep(0.5)  # death screens only last a few seconds; stats pages change as you scroll
+            if getattr(t, "screen_covered", False):  # the overlay is up: it would be read, not the game
+                last_sig = None
+                continue
             try:
                 cur = t.cur or {}
                 # Your Hunt Dollars / Blood Bonds from the menu's top-left bar, now and then.
@@ -1663,10 +1787,17 @@ def start_summary_capture(t: "Tracker") -> None:
                 was["cards"], was["death"] = cards, death
                 folder = ("loading_cards" if cards else "death" if death
                           else "team_details" if cur.get("details_open") else None)
+                # Each new screen (back to the lobby, loading cards, a death...) starts its own count.
+                phase = (cur.get("state"), cards, death, bool(cur.get("details_open")))
+                if phase != was.get("phase"):
+                    was["phase"], shots = phase, 0
                 if not (summary or stats or folder or lobby):
                     last_sig, shots = None, 0
                     continue
-                if shots >= 40 and not stats:  # caps saved screenshots; stats pages are read every time
+                # Caps reads of one long post-match screen. Only there: the lobby never resets the count
+                # (it's always on), so a cap anywhere else stopped the lobby, squad page and next
+                # match's loading cards from being read after a long summary.
+                if shots >= 40 and summary and not (stats or folder):
                     continue
                 if not hunt_is_foreground():
                     m = t.hist["matches"][-1] if t.hist["matches"] else {}
@@ -1688,7 +1819,7 @@ def start_summary_capture(t: "Tracker") -> None:
                     if picked:
                         t.record_ready_hunter(*picked)
                     # Only the squad stats screen: the 3D team lobby turned banners and text into fake names.
-                    cols = read_columns(lw, h)
+                    cols = read_columns(lw, h, px, w)
                     if cols and max(len(c["stats"]) for c in cols) >= 5:
                         t.record_players(cols, "lobby", "")
                     continue
@@ -1711,11 +1842,11 @@ def start_summary_capture(t: "Tracker") -> None:
                         if played:
                             t.record_summary_hunter(played)
                     elif folder == "loading_cards":
-                        got = read_columns(words, h)
+                        got = read_columns(words, h, px, w)
                         if got:
                             t.record_players(got, "cards", name)
                     elif folder == "death":
-                        got = read_death(words, w, h)
+                        got = read_death(words, w, h, px)
                         t.record_death(got, name)
                     elif folder == "team_details":  # every scroll position: whichever rows are on screen
                         got = read_team_details(words, w, h, px)
@@ -1804,6 +1935,300 @@ def start_hotkeys(t: "Tracker") -> None:
     threading.Thread(target=run, daemon=True).start()
 
 
+def start_overlay_hotkey(t: "Tracker") -> None:
+    """The overlay's key combo, system-wide (RegisterHotKey: no hooks, nothing touches the game).
+    It's only held while the OVERLAY button is on; off, the game gets the combo like any other keys.
+    Each press bumps t.overlay_presses for the window."""
+    t.overlay_presses = 0
+    hk = parse_hotkey(t.cfg.get("overlay_key", ""))
+    if os.name != "nt" or not hk:
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    def run():
+        u32 = ctypes.windll.user32
+        held, failed_for = False, None
+        msg = wintypes.MSG()
+        while True:
+            want = bool(t.cfg.get("overlay_mode"))
+            if want and not held and failed_for is None:
+                if u32.RegisterHotKey(None, 1, hk[0] | 0x4000, hk[1]):  # 0x4000 = MOD_NOREPEAT
+                    held = True
+                else:  # another program already has it; tried again after the button is switched
+                    failed_for = want
+                    t.hotkey_errors.append(t.cfg.get("overlay_key", ""))
+            elif not want and held:
+                u32.UnregisterHotKey(None, 1)
+                held = False
+            if failed_for is not None and failed_for != want:
+                failed_for = None
+            while u32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):  # PM_REMOVE
+                if msg.message == 0x0312:  # WM_HOTKEY
+                    t.overlay_presses += 1
+            time.sleep(0.05)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def start_tray(t: "Tracker") -> None:
+    """The tracker's icon in the notification area (by the clock). Right-click: Overlay or Windowed
+    (the one in use is ticked), Open, Quit; double-click: Open. Choices go to t.tray_cmds for the window."""
+    t.tray_cmds = []
+    if os.name != "nt":
+        return
+    import ctypes
+    from ctypes import wintypes
+    u32, sh, k32 = ctypes.windll.user32, ctypes.windll.shell32, ctypes.windll.kernel32
+    LRESULT = ctypes.c_ssize_t
+    WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+    u32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    u32.DefWindowProcW.restype = LRESULT
+    u32.CreateWindowExW.restype = wintypes.HWND
+    u32.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+                                    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                    wintypes.HWND, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+    k32.GetModuleHandleW.restype = ctypes.c_void_p
+    sh.ExtractIconW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR, wintypes.UINT]
+    u32.LoadImageW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR, wintypes.UINT, ctypes.c_int, ctypes.c_int,
+                               wintypes.UINT]
+    u32.CreatePopupMenu.restype = ctypes.c_void_p
+    u32.AppendMenuW.argtypes = [ctypes.c_void_p, wintypes.UINT, ctypes.c_size_t, wintypes.LPCWSTR]
+    u32.TrackPopupMenu.argtypes = [ctypes.c_void_p, wintypes.UINT, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                   wintypes.HWND, ctypes.c_void_p]
+    u32.DestroyMenu.argtypes = [ctypes.c_void_p]
+    u32.LoadImageW.restype = u32.LoadIconW.restype = sh.ExtractIconW.restype = ctypes.c_void_p
+    u32.LoadIconW.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+
+    class WNDCLASSW(ctypes.Structure):
+        _fields_ = [("style", wintypes.UINT), ("lpfnWndProc", WNDPROC), ("cbClsExtra", ctypes.c_int),
+                    ("cbWndExtra", ctypes.c_int), ("hInstance", wintypes.HINSTANCE), ("hIcon", wintypes.HICON),
+                    ("hCursor", wintypes.HANDLE), ("hbrBackground", wintypes.HBRUSH),
+                    ("lpszMenuName", wintypes.LPCWSTR), ("lpszClassName", wintypes.LPCWSTR)]
+
+    class NOTIFYICONDATAW(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("hWnd", wintypes.HWND), ("uID", wintypes.UINT),
+                    ("uFlags", wintypes.UINT), ("uCallbackMessage", wintypes.UINT), ("hIcon", wintypes.HICON),
+                    ("szTip", wintypes.WCHAR * 128), ("dwState", wintypes.DWORD), ("dwStateMask", wintypes.DWORD),
+                    ("szInfo", wintypes.WCHAR * 256), ("uVersion", wintypes.UINT),
+                    ("szInfoTitle", wintypes.WCHAR * 64), ("dwInfoFlags", wintypes.DWORD),
+                    ("guidItem", ctypes.c_byte * 16), ("hBalloonIcon", wintypes.HICON)]
+
+    WM_TRAY = 0x8001
+    CHOICES = {1: "overlay", 2: "windowed", 3: "open", 4: "quit"}
+
+    def run():
+        def proc(hwnd, msg, wp, lp):
+            if msg == WM_TRAY:
+                if lp in (0x0205, 0x007B):  # right button up / context menu
+                    on = bool(t.cfg.get("overlay_mode"))
+                    menu = u32.CreatePopupMenu()
+                    u32.AppendMenuW(menu, 0x8 if on else 0, 1, "Overlay")  # 0x8 = MF_CHECKED
+                    u32.AppendMenuW(menu, 0 if on else 0x8, 2, "Windowed")
+                    u32.AppendMenuW(menu, 0x800, 0, None)  # a separator
+                    u32.AppendMenuW(menu, 0, 3, "Open")
+                    u32.AppendMenuW(menu, 0, 4, "Quit Hunt Tracker")
+                    pt = wintypes.POINT()
+                    u32.GetCursorPos(ctypes.byref(pt))
+                    u32.SetForegroundWindow(hwnd)  # or the menu stays open after clicking elsewhere
+                    cmd = u32.TrackPopupMenu(menu, 0x0100 | 0x0002, pt.x, pt.y, 0, hwnd, None)  # RETURNCMD
+                    u32.PostMessageW(hwnd, 0, 0, 0)
+                    u32.DestroyMenu(menu)
+                    if cmd in CHOICES:
+                        t.tray_cmds.append(CHOICES[cmd])
+                elif lp == 0x0203:  # double-click
+                    t.tray_cmds.append("open")
+                return 0
+            return u32.DefWindowProcW(hwnd, msg, wp, lp)
+
+        wndproc = WNDPROC(proc)
+        t.tray_proc = wndproc  # kept alive as long as the window
+        hinst = k32.GetModuleHandleW(None)
+        wc = WNDCLASSW()
+        wc.lpfnWndProc, wc.hInstance, wc.lpszClassName = wndproc, hinst, "HuntTrackerTray"
+        u32.RegisterClassW(ctypes.byref(wc))
+        # A message-only window (parent HWND_MESSAGE): it only takes the icon's clicks, and can never
+        # be shown or get a taskbar button.
+        hwnd = u32.CreateWindowExW(0, "HuntTrackerTray", "HuntTrackerTray", 0, 0, 0, 0, 0, wintypes.HWND(-3), None,
+                                   hinst, None)
+        icon = None
+        if FROZEN:
+            icon = sh.ExtractIconW(hinst, sys.executable, 0)
+        else:
+            ico = Path(__file__).resolve().parent / "installer" / "icon.ico"
+            if ico.exists():
+                icon = u32.LoadImageW(None, str(ico), 1, 0, 0, 0x10 | 0x40)  # LOADFROMFILE | DEFAULTSIZE
+        icon = icon or u32.LoadIconW(None, 32512)
+        nid = NOTIFYICONDATAW()
+        nid.cbSize, nid.hWnd, nid.uID = ctypes.sizeof(NOTIFYICONDATAW), hwnd, 1
+        nid.uFlags, nid.uCallbackMessage, nid.hIcon = 1 | 2 | 4, WM_TRAY, icon  # MESSAGE | ICON | TIP
+        nid.szTip = "Hunt Tracker"
+        sh.Shell_NotifyIconW(0, ctypes.byref(nid))  # NIM_ADD
+        t.tray_remove = lambda: sh.Shell_NotifyIconW(2, ctypes.byref(nid))  # NIM_DELETE
+        msg = wintypes.MSG()
+        while u32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+            u32.TranslateMessage(ctypes.byref(msg))
+            u32.DispatchMessageW(ctypes.byref(msg))
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+class InputShield:
+    """While the overlay is up, Hunt mustn't get its clicks: the game reads the mouse (and Esc) even
+    when it isn't the window in front. Only then, low-level hooks (a standard Windows feature, as
+    push-to-talk apps use; nothing in the game is touched) keep clicks, the wheel and Esc on Hunt's
+    screen from reaching anything, and queue them in .events for the overlay to act on. Mouse moves
+    still go through. The hooks are removed as soon as the overlay closes, so play is never affected."""
+
+    def __init__(self):
+        self.on, self.rect, self.events, self.held, self.tid = False, (0, 0, 0, 0), [], False, 0
+        if os.name == "nt":
+            threading.Thread(target=self._run, daemon=True).start()
+
+    def switch(self, on: bool) -> None:
+        """On or off, and wake the hook thread so it happens now, not at its next check."""
+        self.on = on
+        if self.tid:
+            import ctypes
+            ctypes.windll.user32.PostThreadMessageW(self.tid, 0x0400, 0, 0)  # WM_USER: just a nudge
+
+    def _run(self):
+        import ctypes
+        from ctypes import wintypes
+        u32, k32 = ctypes.windll.user32, ctypes.windll.kernel32
+        LRESULT = ctypes.c_ssize_t
+        PROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+        u32.SetWindowsHookExW.restype = ctypes.c_void_p
+        u32.SetWindowsHookExW.argtypes = [ctypes.c_int, PROC, ctypes.c_void_p, wintypes.DWORD]
+        u32.CallNextHookEx.restype = LRESULT
+        u32.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+        u32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+        k32.GetModuleHandleW.restype = ctypes.c_void_p
+
+        class MOUSE(ctypes.Structure):
+            _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long), ("data", wintypes.DWORD),
+                        ("flags", wintypes.DWORD), ("time", wintypes.DWORD), ("extra", ctypes.c_size_t)]
+
+        class KEY(ctypes.Structure):
+            _fields_ = [("vk", wintypes.DWORD), ("scan", wintypes.DWORD), ("flags", wintypes.DWORD),
+                        ("time", wintypes.DWORD), ("extra", ctypes.c_size_t)]
+
+        def on_screen(x, y):
+            l, tp, r, b = self.rect
+            return l <= x < r and tp <= y < b
+
+        def mouse(n, wp, lp):
+            try:
+                if n == 0 and self.on:
+                    m = MOUSE.from_address(lp)
+                    if wp == 0x0200:  # moves go through; while a button is held they drag a panel
+                        if self.held:
+                            self.events.append(("move", m.x, m.y))
+                    elif on_screen(m.x, m.y) or self.held:
+                        if wp in (0x0201, 0x0202):  # left button down / up
+                            self.held = wp == 0x0201
+                            self.events.append(("down" if self.held else "up", m.x, m.y))
+                            return 1
+                        if wp == 0x020A:  # the wheel
+                            self.events.append(("wheel", m.x, m.y, ctypes.c_short(m.data >> 16).value))
+                            return 1
+                        if wp in (0x0204, 0x0205, 0x0207, 0x0208, 0x020B, 0x020C, 0x020E):
+                            return 1  # right / middle / side buttons: nothing in the overlay uses them
+            except Exception:  # noqa: BLE001 - a hook must never fail
+                pass
+            return u32.CallNextHookEx(None, n, wp, lp)
+
+        def keys(n, wp, lp):
+            try:
+                if n == 0 and self.on and KEY.from_address(lp).vk == 0x1B:  # Esc: closes the overlay only
+                    if wp in (0x0100, 0x0104):
+                        self.events.append(("esc", 0, 0))
+                    return 1
+            except Exception:  # noqa: BLE001
+                pass
+            return u32.CallNextHookEx(None, n, wp, lp)
+
+        mouse_cb, keys_cb = PROC(mouse), PROC(keys)
+        hooks: list = []
+        msg = wintypes.MSG()
+        u32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 0)  # gives this thread its message queue
+        self.tid = k32.GetCurrentThreadId()
+        while True:
+            if self.on and not hooks:
+                mod = k32.GetModuleHandleW(None)
+                hooks = [h for h in (u32.SetWindowsHookExW(14, mouse_cb, mod, 0),  # WH_MOUSE_LL
+                                     u32.SetWindowsHookExW(13, keys_cb, mod, 0)) if h]  # WH_KEYBOARD_LL
+            elif not self.on and hooks:
+                for h in hooks:
+                    u32.UnhookWindowsHookEx(h)
+                hooks, self.held = [], False
+            # The hooks run inside this thread's message loop: wait for messages, not a fixed sleep.
+            u32.MsgWaitForMultipleObjects(0, None, False, 20 if hooks else 200, 0x04FF)
+            while u32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
+                u32.TranslateMessage(ctypes.byref(msg))
+                u32.DispatchMessageW(ctypes.byref(msg))
+
+
+def hunt_monitor(full: bool = False):
+    """(Hunt's window or None, (left, top, right, bottom) of the monitor it's on, else of the main
+    monitor: its work area, or with full=True the whole screen), in the window's own pixel units."""
+    import ctypes
+    from ctypes import wintypes
+    u32 = ctypes.windll.user32
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+    found = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    def each(hwnd, _):
+        if u32.IsWindowVisible(hwnd) and not u32.IsIconic(hwnd) and _is_hunt_window(hwnd):
+            found.append(hwnd)
+            return False
+        return True
+    u32.EnumWindows(each, 0)
+    hw = found[0] if found else None
+    u32.MonitorFromWindow.restype = u32.MonitorFromPoint.restype = ctypes.c_void_p
+    mon = u32.MonitorFromWindow(hw, 1) if hw else u32.MonitorFromPoint(wintypes.POINT(0, 0), 1)
+    mi = MONITORINFO()
+    mi.cbSize = ctypes.sizeof(MONITORINFO)
+    u32.GetMonitorInfoW(ctypes.c_void_p(mon), ctypes.byref(mi))
+    r = mi.rcMonitor if full else mi.rcWork
+    return hw, (r.left, r.top, r.right, r.bottom)
+
+
+def log_error(where: str, tb: str) -> None:
+    """Keep an error's details in crash.log (the installed app has no console to print them to)."""
+    try:
+        path = DATA / "crash.log"
+        old = path.read_text(encoding="utf-8")[-30000:] if path.exists() else ""
+        path.write_text(old + time.strftime("\n[%Y-%m-%d %H:%M:%S] ") + where + "\n" + tb, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def log_overlay(what: str) -> None:
+    """overlay.log: each time the overlay opens or closes, and why (to find what closes it unasked)."""
+    try:
+        path = DATA / "overlay.log"
+        old = path.read_text(encoding="utf-8")[-20000:] if path.exists() else ""
+        path.write_text(old + time.strftime("%Y-%m-%d %H:%M:%S") + f".{int(time.time() * 1000) % 1000:03d} {what}\n",
+                        encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _log_thread_error(a) -> None:
+    import traceback
+    log_error(f"thread {getattr(a.thread, 'name', '?')}",
+              "".join(traceback.format_exception(a.exc_type, a.exc_value, a.exc_traceback)))
+
+
+threading.excepthook = _log_thread_error
+
+
 # ------------------------------------------------------------------ tracker
 class Tracker:
     def __init__(self, cfg: dict, log: Path):
@@ -1837,11 +2262,14 @@ class Tracker:
         return {"v": HIST_VERSION, "sessions": {}, "seeded": False, "levels": []}
 
     # ---- player log (filled from loading cards and death screens)
-    def _key(self, name: str) -> str:
+    def _key(self, name: str, match: dict = None) -> str:
         """The player-log key for a name: an already-logged player whose name is nearly the same
         (OCR misread a letter or two), unless the numbers in the names differ."""
         import difflib
         k = player_key(name)
+        if is_barcode(name):  # every barcode name looks alike: one entry per match, never merged across
+            m = match or (self.hist["matches"][-1] if self.hist.get("matches") else None)
+            return f"{k}-{int(m['key'])}" if m else k
         players = self.hist.get("players", {})
         if k in players or len(k) < 8:
             return k
@@ -1951,6 +2379,18 @@ class Tracker:
 
     def _read(self, kind: str, data: dict, file: str) -> None:
         self.hist["reads"] = (self.hist["reads"] + [{"t": time.time(), "kind": kind, "file": file, **data}])[-20:]
+
+    def tidy_players(self) -> None:
+        """Players that were really screen text (once: the overlay's own panels, read as a squad page)."""
+        junk = [k for k, p in self.hist["players"].items() if not_a_player(p.get("name", ""))]
+        for k in junk:
+            del self.hist["players"][k]
+        sq = self.hist.get("squad") or {}
+        names = [n for n in sq.get("names", []) if not not_a_player(n)]
+        if junk or names != sq.get("names", []):
+            if sq:
+                sq["names"] = names
+            self._save()
 
     def tidy_hunters(self) -> None:
         """Hunters read wrongly by earlier versions: a lobby button ("V View Team Loadouts"), a misread
@@ -2131,7 +2571,7 @@ class Tracker:
             for votes in (m.get("deaths") or {}).values():
                 if votes:
                     v = max(votes.values(), key=lambda v: v["n"])
-                    if not v.get("ai") and self._key(v["name"]) == k:
+                    if not v.get("ai") and self._key(v["name"], m) == k:
                         deaths.append((m["key"], v.get("hunter"), v.get("weapon")))
         side = "teammate" if p.get("squad") or p.get("mmr_side") == "teammate" else (p.get("mmr_side") or "")
         return {"name": p["name"], "first": p.get("first"), "last": p.get("last"), "seen": encounters(p),
@@ -2267,6 +2707,25 @@ class Tracker:
             self.changed_at = time.time()
             self._save()
 
+    def live_career(self) -> dict:
+        """Your Career stats kept up to date between visits to Statistics: kills from match summaries
+        and deaths from death screens (not to AI) since it was last read. Opening Statistics again
+        replaces them with the game's own counts."""
+        c = load_career() or {}
+        hd = c.get("headline", {})
+        if "Players Killed" not in hd:
+            return c
+        since = c.get("kills_at") or 0
+        deaths = 0
+        if "Killed by Player" in hd:
+            hunts = [h for s in self.hist["sessions"].values() for h in s.get("hunts", [])]
+            deaths = sum(h.get("deaths", 0) for h in hunts if (h.get("t") or 0) > since)
+            cur = self.cur or {}
+            if self.running and cur.get("state") == "hunt" and (cur.get("hunt_t") or 0) > since:
+                deaths += cur.get("cur_deaths", 0)  # this hunt, until it's logged with the others
+            deaths -= sum(len(m.get("ai_killers", [])) for m in self.hist["matches"] if m["key"] > since)
+        return apply_live(c, self.summary_kills(), max(0, deaths))
+
     def summary_kills(self) -> int:
         """Kills from match summaries the career numbers don't include yet."""
         c = load_career() or {}
@@ -2330,7 +2789,7 @@ class Tracker:
         m["killers"] = winners
         m["ai_killers"] = ai
         # Drop players that only existed as a misread killer name that lost the vote.
-        keep = {self._key(k) for mm in self.hist["matches"] for k in mm.get("killers", [])}
+        keep = {self._key(k, mm) for mm in self.hist["matches"] for k in mm.get("killers", [])}
         for k in [k for k, p in self.hist["players"].items()
                   if not p.get("matches") and not p.get("squad") and p.get("mmr") is None and k not in keep]:
             del self.hist["players"][k]
@@ -2357,7 +2816,7 @@ class Tracker:
         kills: dict = {}
         for mm in matches:
             for k in mm.get("killers", []):
-                kills[self._key(k)] = kills.get(self._key(k), 0) + 1
+                kills[self._key(k, mm)] = kills.get(self._key(k, mm), 0) + 1
         # This match's killers only (it clears each match); the count is every time they've killed you.
         killers = []
         if cur and not (squad_mode and sq["t"] > cur["key"]):
@@ -2564,11 +3023,14 @@ class Tracker:
             "clash_n": sum(1 for h in hunts if h.get("mode") == "Bounty Clash"),
             "ai_deaths": [a for mm in self.hist["matches"] for a in mm.get("ai_killers", [])],
             "career": load_career() or {"empty": True}, "page": self.cfg.get("page", "tracker"),
+            "career_live": self.live_career(),
             "summary_kills": self.summary_kills(), "wallet": self.wallet_view(),
             # Kills count per hunter; each is shown by its full name with the skin last seen in the lobby.
             "hunter_kills": self.full_hunter_name_row(self.current_hunter_kills() or self.hunter_kills()),
             "hunter_table": [(self.hist.get("hunter_names", {}).get(hn, hn), k, n) for hn, k, n in self.hunter_table()],
             "hunter_level": self.current_hunter_level(),
+            # Your best single hunt: "Hunters Killed +N" from match summaries.
+            "best_hunt": max((m["kills"] for m in self.hist["matches"] if m.get("kills")), default=None),
             "hidden_families": self.cfg.get("hidden_families", []),
             "mmr": self.hist["mmr"][-1][1] if self.hist["mmr"] else None,
             "mmr_prev": self.hist["mmr"][-2][1] if len(self.hist["mmr"]) > 1 else None,
@@ -3074,7 +3536,7 @@ def scene(v: dict, min_h: int = 0, W: int = 360, block_at=None, block: str = "de
         return y + 19 * half
 
     def career_panel(y):
-        c = v["career"]
+        c = v.get("career_live") or v["career"]
         hd = c.get("headline", {})
         who = c.get("name") or ("not read yet: open Statistics in Hunt's menu" if c.get("empty") else "")
         if c.get("prestige") is not None:
@@ -3082,7 +3544,10 @@ def scene(v: dict, min_h: int = 0, W: int = 360, block_at=None, block: str = "de
         y = section(y, "CAREER (in-game profile)")
         text(PAD, y, who, 12, C["cream"], bold=True)
         y += 20
-        dl = c.get("deltas", {})  # what went up since you last checked your stats; cleared each match
+        dl = dict(c.get("deltas", {}))  # what went up since you last checked your stats; cleared each match
+        for k_, n_ in c.get("live", {}).items():  # tracked since then; Statistics confirms or corrects it
+            if n_:
+                dl[k_] = dl.get(k_, 0) + n_
 
         def box(label, key, src=hd, unit=""):
             val = src.get(key, 0)  # not read yet: 0
@@ -3185,6 +3650,16 @@ def scene(v: dict, min_h: int = 0, W: int = 360, block_at=None, block: str = "de
             text(W - PAD - 4, y + 6, val, 17, level_col, "end", bold=True, mono=True)
             if icon_png("Hunter Level", 8):  # the game's level icon (icons/Hunter Level.png), like the lobby's
                 ops.append(("image", W - PAD - 4 - int(len(val) * 7.6) - 21, y + 8, "Hunter Level", 20))
+            y += 38
+        if v.get("best_hunt"):
+            rect(PAD - 4, y, W - PAD + 4, y + 32, C["panel"], C["inner"])
+            lab, val = "MOST KILLS IN ONE HUNT", f"{v['best_hunt']:,}"
+            room = W - 2 * PAD - 10 - len(val) * 10 - 12
+            size = 12
+            while size > 8 and len(lab) * size * 0.62 > room:
+                size -= 1
+            text(PAD + 6, y + 9 + (12 - size) // 2, lab, size, C["brass"], bold=True)
+            text(W - PAD - 4, y + 6, val, 17, C["cream"], "end", bold=True, mono=True)
             y += 38
         if v.get("wallet"):
             dollars, bonds, plus_d, plus_b, spent = v["wallet"]
@@ -3817,12 +4292,21 @@ def run_window(t: Tracker) -> None:
     import ctypes
     ctypes.windll.kernel32.CreateMutexW(None, False, "HuntTrackerWindow")
     if ctypes.windll.kernel32.GetLastError() == 183:  # already open
-        hw = ctypes.windll.user32.FindWindowW(None, "Hunt Tracker")
+        if t.cfg.get("overlay_mode"):
+            return  # overlay mode: its window stays hidden (End opens the overlay, the tray icon the rest)
+        hw = ctypes.windll.user32.FindWindowW("TkTopLevel", "Hunt Tracker")
         if hw:
             ctypes.windll.user32.ShowWindow(hw, 9)
             ctypes.windll.user32.SetForegroundWindow(hw)
         return
     root = tk.Tk()
+
+    def callback_error(exc, val, tb_):
+        import traceback
+        log_error("window", "".join(traceback.format_exception(exc, val, tb_)))
+    root.report_callback_exception = callback_error
+    if t.cfg.get("overlay_mode"):  # overlay mode: never shown, so starting doesn't take the game's focus
+        root.withdraw()
     root.title("Hunt Tracker")
     root.configure(bg=C["bg"])
     root.resizable(True, True)  # drag the edges like any window; everything scales to fit
@@ -3859,6 +4343,8 @@ def run_window(t: Tracker) -> None:
 
     def save_pos():
         st["pos_job"] = None
+        if root.state() == "withdrawn":  # overlay mode: the window is hidden, its spot stays as it was
+            return
         p = [root.winfo_x(), root.winfo_y()]
         s = [root.winfo_width(), root.winfo_height()]
         if (p != t.cfg.get("window_pos") or s != t.cfg.get("window_size")) and on_a_monitor(*p):
@@ -3867,6 +4353,10 @@ def run_window(t: Tracker) -> None:
 
     def close(_e=None):
         save_pos()
+        try:
+            getattr(t, "tray_remove", lambda: None)()
+        except Exception:  # noqa: BLE001
+            pass
         root.destroy()
 
     root.bind("<Configure>", remember_pos)
@@ -3945,7 +4435,7 @@ def run_window(t: Tracker) -> None:
     toggles = [
         ("CAREER", career, refresh_view, lambda: True),
         ("PLAYER SUMMARY", players, refresh_view, lambda: True),
-        ("DETAILED", detailed, lambda: (toggle_detail(), paint_bar()), lambda: True),
+        ("HUNT LOG", detailed, lambda: (toggle_detail(), paint_bar()), lambda: True),
     ]
     buttons = []
 
@@ -4369,10 +4859,25 @@ def run_window(t: Tracker) -> None:
     lb_btn.pack(side="left", fill="y")
     lb = {"stat": 0, "rows": None, "loading": False}
 
+    # ---- OVERLAY: switches between overlay mode and a normal window (see the overlay below)
+    ov_btn = tk.Label(bar, bg="#0b0908", font=(TEXT_FONT, 10, "bold"), padx=12, cursor="hand2")
+    ov_btn.pack(side="left", fill="y")
+
+    def paint_ov_btn(hover=False):
+        on = bool(t.cfg.get("overlay_mode"))
+        key = t.cfg.get("overlay_key", "End")
+        ov_btn.configure(text=f"\u25c6 OVERLAY ({key})" if on else "\u25c7 OVERLAY",
+                         fg=C["brass"] if on or hover else "#6f6456")
+
+    paint_ov_btn()
+    ov_btn.bind("<Button-1>", lambda e: set_mode(not t.cfg.get("overlay_mode")))
+    ov_btn.bind("<Enter>", lambda e: paint_ov_btn(True))
+    ov_btn.bind("<Leave>", lambda e: paint_ov_btn())
+
     def lb_set_share(on: bool):
         t.cfg["leaderboard_opt_in"] = on
         save_cfg()
-        c = load_career() or {}
+        c = t.live_career()
         threading.Thread(target=(lambda: lb_upload(t.cfg, c)) if on else (lambda: lb_remove(t.cfg)),
                          daemon=True).start()
         lb_refresh()
@@ -4398,13 +4903,17 @@ def run_window(t: Tracker) -> None:
         if p is not None and p.winfo_exists():
             p.destroy()
         lb_btn.configure(text="◇ LEADERBOARD", fg="#6f6456")
+        for hook in lb_hooks:
+            hook()
 
-    def lb_open(_e=None):
+    lb_hooks: list = []  # the overlay hides its leaderboard window when the board closes
+
+    def lb_open(_e=None, parent=None):
         if st.get("lb") is not None and st["lb"].winfo_exists():
             lb_close()
             return
         close_graph()
-        frame = tk.Frame(canvas, bg=C["blood"])
+        frame = tk.Frame(parent or canvas, bg=C["blood"])
         cv = tk.Canvas(frame, bg=C["panel"], highlightthickness=0, bd=0)
         cv.pack(fill="both", expand=True, padx=1, pady=1)
         st["lb"] = frame
@@ -4528,7 +5037,7 @@ def run_window(t: Tracker) -> None:
 
     def lb_keep_fresh():
         """While sharing: send your numbers whenever your Career stats change (checked each minute)."""
-        c = load_career() or {}
+        c = t.live_career()
         sig = json.dumps(lb_entry(c)["stats"], sort_keys=True)
         if t.cfg.get("leaderboard_opt_in") and sig != st.get("lb_sig"):
             st["lb_sig"] = sig
@@ -4548,6 +5057,472 @@ def run_window(t: Tracker) -> None:
     root.after(4000, lb_ask)
     root.after(8000, lb_keep_fresh)
 
+    # ---- Overlay mode (the OVERLAY button, remembered): the tracker's window stays hidden, and End
+    # opens its panels over Hunt with the game dimmed behind them, a bar of toggles across the top.
+    # Each panel is a small window of its own: drag it by its top strip. End, Esc or a click on the
+    # dimmed game: back to Hunt.
+    start_overlay_hotkey(t)
+    OVERLAY_PANELS = [  # (key, title, (view, width) -> (W, H, ops)), left to right the first time
+        ("now", "HUNT TRACKER", lambda v_, w_: scene(dict(v_, page="tracker", detailed=False), 0, w_, part="top")),
+        ("log", "HUNT LOG", lambda v_, w_: framed_scene(v_, 0, w_, "HUNT LOG", "detailed")),
+        ("career", "CAREER", lambda v_, w_: framed_scene(v_, 0, w_, "CAREER", "career")),
+        ("players", "PLAYER SUMMARY", lambda v_, w_: players_scene(dict(v_, page="tracker", detailed=False), 0, w_)),
+    ]
+    BAR_TOGGLES = [("HUNT LOG", "log"), ("CAREER", "career"), ("PLAYER SUMMARY", "players")]  # as the panels' titles
+    BAR_BG, DIM_TEXT = "#0b0908", "#6f6456"
+    ov: dict = {"open": False, "panels": {}, "last": {}, "mon": None, "drag": None}
+    u32 = ctypes.windll.user32
+    shield = InputShield()
+
+    def shield_pump():
+        """The overlay's clicks, kept from Hunt by the shield, handed to the overlay's own widgets."""
+        if not ov["open"]:
+            return
+        evs = []
+        while shield.events:
+            evs.append(shield.events.pop(0))
+        moves = None
+        for ev in evs:
+            if ev[0] == "move":
+                moves = ev  # only the latest position matters
+                continue
+            if moves:
+                shield_deliver(moves)
+                moves = None
+            shield_deliver(ev)
+        if moves:
+            shield_deliver(moves)
+        root.after(15, shield_pump)
+
+    def widget_at(x, y):
+        """The overlay widget really under the pointer (Windows' own answer: Tk's guess goes by the
+        order it made its windows in, not what's on top)."""
+        from ctypes import wintypes
+        u32.WindowFromPoint.argtypes = [wintypes.POINT]
+        u32.WindowFromPoint.restype = ctypes.c_void_p
+        hw = u32.WindowFromPoint(wintypes.POINT(x, y))
+        todo = [w_ for w_ in [ov.get("dim"), ov.get("bar"), ov.get("lbwin")] + [p_["win"] for p_ in ov["panels"].values()]
+                if w_ is not None]
+        while todo:
+            w_ = todo.pop()
+            if w_.winfo_id() == hw:
+                return w_
+            todo.extend(w_.winfo_children())
+        return None
+
+    def shield_deliver(ev):
+        kind, x, y = ev[:3]
+        if kind == "esc":
+            on_esc()
+            return
+        w_ = widget_at(x, y) if kind in ("down", "wheel") else ov.get("press_w")
+        if kind == "down":
+            ov["press_w"] = w_
+        if w_ is None or not w_.winfo_exists():
+            return
+        at = {"x": x - w_.winfo_rootx(), "y": y - w_.winfo_rooty(), "rootx": x, "rooty": y}
+        if kind == "down":
+            w_.event_generate("<Motion>", **at)  # a canvas picks the item under the pointer
+            w_.event_generate("<ButtonPress-1>", **at)
+        elif kind == "move":
+            w_.event_generate("<B1-Motion>", **at)
+        elif kind == "up":
+            w_.event_generate("<ButtonRelease-1>", **at)
+            ov["press_w"] = None
+        elif kind == "wheel":
+            w_.event_generate("<MouseWheel>", delta=ev[3], **at)
+
+    def focus(hwnd):
+        """Give a window the focus. Hunt keeps itself on top while it has the focus, so the overlay
+        only shows over it once it takes the focus; Windows allows that while joined to the input
+        of the window that has it."""
+        k32 = ctypes.windll.kernel32
+        other, me = u32.GetWindowThreadProcessId(u32.GetForegroundWindow(), None), k32.GetCurrentThreadId()
+        joined = other and other != me and u32.AttachThreadInput(me, other, True)
+        try:
+            u32.SetForegroundWindow(hwnd)
+            u32.BringWindowToTop(hwnd)
+        finally:
+            if joined:
+                u32.AttachThreadInput(me, other, False)
+
+    def hwnd_of(w_):
+        return int(w_.wm_frame(), 16)
+
+    u32.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+
+    def own(w_, owner=None):
+        """Give a window an owner: Windows always keeps an owned window above its owner. The dim
+        layer and the "running" message belong to Hunt's window (so they stay above it, however
+        often Hunt puts itself on top; nothing in the game is touched), the panels, bar and
+        leaderboard to the dim layer (so they're always above the dimming)."""
+        hw = owner or ov.get("hunt_hw")
+        if hw and getattr(w_, "owner_hw", None) != hw:
+            u32.SetWindowLongPtrW(hwnd_of(w_), -8, hw)  # GWLP_HWNDPARENT: the owner
+            w_.owner_hw = hw
+
+    def show(w_, on, activate=False):
+        """Shown and hidden by Windows directly: the "running" message appears without taking the
+        game's focus (Tk's own deiconify would)."""
+        u32.ShowWindow(hwnd_of(w_), (5 if activate else 4) if on else 0)  # SW_SHOW / SHOWNOACTIVATE / HIDE
+
+    def put(w_, x, y, top=True):
+        """Move a window (Windows itself: Tk's moves got undone across monitors), kept on top."""
+        w_.geometry(f"+{x}+{y}")
+        u32.SetWindowPos(hwnd_of(w_), -1 if top else 0, x, y, 0, 0, 0x0001 | 0x0010 | (0 if top else 0x0004))
+
+    def scale():
+        l, tp, r, b = ov["mon"]
+        return float(t.cfg.get("overlay_scale") or round((b - tp) / 1100, 2))  # 1440p: ~1.3x the window's size
+
+    def font(size, bold=True):
+        return (TEXT_FONT, max(8, int(size * scale())), "bold" if bold else "normal")
+
+    def new_win(bg):
+        w_ = tk.Toplevel(root, bg=bg)
+        w_.title("Hunt Tracker overlay")  # never mistaken for the main window ("Hunt Tracker")
+        w_.overrideredirect(True)
+        w_.attributes("-topmost", True)
+        w_.attributes("-alpha", 0.0)  # mapped once, unseen; from then on shown / hidden by show()
+        w_.bind("<Escape>", on_esc)
+        return w_
+
+    def ov_build():
+        """Every overlay window, made once (while this program has the focus) and then hidden."""
+        if ov.get("built"):
+            return
+        ov["built"] = True
+        was_front = u32.GetForegroundWindow()  # making windows takes the focus: it goes back after
+        if ov["mon"] is None:
+            ov["mon"] = hunt_monitor(full=True)[1]
+        dim = new_win("black")
+        dim.bind("<Button-1>", lambda _e: ov_close(why="click on the dimmed game")
+                 if time.time() - ov.get("opened_at", 0) > 0.5 else log_overlay("ignored a click right after opening"))
+        bar_ = new_win(BAR_BG)
+        tk.Frame(bar_, bg=C["blood"], height=1).pack(side="bottom", fill="x")
+        btns = {}
+        for label, key in BAR_TOGGLES + [("LEADERBOARD", "lb"), ("OVERLAY", "mode")]:
+            b_ = tk.Label(bar_, bg=BAR_BG, font=font(10), padx=12, cursor="hand2")
+            b_.pack(side="left", fill="y")
+            b_.bind("<Button-1>", lambda _e, k_=key: bar_click(k_))
+            b_.bind("<Enter>", lambda _e, k_=key: paint_ov_bar(k_))
+            b_.bind("<Leave>", lambda _e: paint_ov_bar())
+            btns[key] = (label, b_)
+        tk.Label(bar_, bg=BAR_BG, fg=DIM_TEXT, font=font(9, False), padx=12, text=f"v{VERSION}").pack(side="right", fill="y")
+        tk.Label(bar_, bg=BAR_BG, fg=DIM_TEXT, font=font(9, False), padx=12,
+                 text=f"{t.cfg.get('overlay_key', 'End')} or Esc: back to Hunt   \u00b7   "
+                      "drag a panel by its top strip").pack(side="right", fill="y")
+        lbwin = new_win(C["blood"])
+        toast = toast_win()
+        ov.update(dim=dim, bar=bar_, btns=btns, lbwin=lbwin, toast=toast)
+        for key, title, _b in OVERLAY_PANELS:
+            panel_win(key, title)
+        root.update_idletasks()
+        for w_ in [dim, bar_, lbwin, toast] + [p_["win"] for p_ in ov["panels"].values()]:
+            show(w_, False)
+        dim.attributes("-alpha", float(t.cfg.get("overlay_dim", 0.55)))
+        for w_ in [bar_, lbwin] + [p_["win"] for p_ in ov["panels"].values()]:
+            w_.attributes("-alpha", 1.0)
+            own(w_, hwnd_of(dim))
+        click_through(toast)
+        paint_ov_bar()
+        if was_front and u32.GetForegroundWindow() != was_front:
+            focus(was_front)
+
+    def click_through(w_):
+        hw = hwnd_of(w_)
+        u32.SetWindowLongW(hw, -20, u32.GetWindowLongW(hw, -20) | 0x80000 | 0x20 | 0x08000000)
+
+    def toast_win():
+        """"Hunt Tracker is running", with its logo: shown at the bottom of Hunt's screen as the game
+        starts, then fades out. Clicks go through it to the game."""
+        w_ = new_win(C["blood"])
+        box = tk.Frame(w_, bg=BAR_BG, padx=int(16 * scale()), pady=int(10 * scale()))
+        box.pack(padx=1, pady=1)
+        L = int(44 * scale())
+        logo = tk.Canvas(box, width=L, height=L, bg="#14100d", highlightthickness=0, bd=0)
+        logo.pack(side="left", padx=(0, int(14 * scale())))
+        c_ = L / 2
+        logo.create_rectangle(0, 0, L - 1, L - 1, outline="#6b241d", width=max(1, L // 32))
+
+        def diamond(r_, **kw):
+            return logo.create_polygon(c_, c_ - r_, c_ + r_, c_, c_, c_ + r_, c_ - r_, c_, **kw)
+        diamond(L * 0.36, fill="", outline="#c9a46a", width=max(2, L // 12))
+        diamond(L * 0.18, fill="#c9a46a", outline="")
+        words = tk.Frame(box, bg=BAR_BG)
+        words.pack(side="left")
+        tk.Label(words, text="HUNT TRACKER", bg=BAR_BG, fg=C["brass"], font=font(15)).pack(anchor="w")
+        sub = tk.Label(words, bg=BAR_BG, fg=C["cream"], font=font(10, False))
+        sub.pack(anchor="w")
+        w_.sub = sub
+        return w_
+
+    def covered():
+        """Screen reading pauses while the overlay or the "running" message is over Hunt's screen."""
+        t.screen_covered = bool(ov.get("open") or ov.get("toast_up"))
+
+    def toast_show():
+        """The "running" message, once per start of the game."""
+        w_ = ov["toast"]
+        ov["toast_up"] = True
+        covered()
+        key = t.cfg.get("overlay_key", "End")
+        w_.sub.configure(text=f"is running  \u00b7  press {key} for the overlay" if t.cfg.get("overlay_mode")
+                         else "is running  \u00b7  its window is open on your desktop")
+        w_.update_idletasks()
+        l, tp, r, b = ov["mon"]
+        ww, wh = w_.winfo_reqwidth(), w_.winfo_reqheight()
+        own(w_)
+        w_.attributes("-alpha", 0.0)
+        show(w_, True)
+        put(w_, l + (r - l - ww) // 2, b - wh - int((b - tp) * 0.09))
+        steps = [i / 10 * 0.95 for i in range(1, 11)] + [0.95] * 60 + [0.95 * (1 - i / 25) for i in range(1, 26)]
+
+        def fade(i=0):
+            if i >= len(steps):
+                show(w_, False)
+                ov["toast_up"] = False
+                covered()
+                return
+            w_.attributes("-alpha", steps[i])
+            if i % 10 == 0:  # Hunt keeps putting itself on top while it starts
+                u32.SetWindowPos(hwnd_of(w_), -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
+            root.after(100, lambda: fade(i + 1))
+        fade()
+
+    def panel_win(key, title):
+        w_ = new_win(C["blood"])
+        strip = tk.Frame(w_, bg=BAR_BG)
+        grip = tk.Label(strip, bg=BAR_BG, fg=DIM_TEXT, font=font(9), padx=10, pady=2, cursor="fleur",
+                        text="\u2237  " + title)
+        grip.pack(side="left", fill="y")
+        cv = tk.Canvas(w_, bg=C["bg"], highlightthickness=0, bd=0, cursor="fleur")
+        for wd in (strip, grip, cv):
+            wd.bind("<ButtonPress-1>", lambda e, k_=key: drag(e, k_, "start"))
+            wd.bind("<B1-Motion>", lambda e, k_=key: drag(e, k_, "move"))
+            wd.bind("<ButtonRelease-1>", lambda e, k_=key: drag(e, k_, "end"))
+        strip.pack(side="top", fill="x")
+        cv.pack(side="top")
+        ov["panels"][key] = {"win": w_, "cv": cv, "shown": False}
+
+    def paint_ov_bar(hover=None):
+        if not ov.get("built"):
+            return
+        hidden = set(t.cfg.get("overlay_hidden") or [])
+        lb_here = st.get("lb") is not None and st["lb"].winfo_exists() and st["lb"].master is ov["lbwin"]
+        for key, (label, b_) in ov["btns"].items():
+            if key == "mode":
+                on, label = True, f"OVERLAY ({t.cfg.get('overlay_key', 'End')})"
+            elif key == "lb":
+                on = lb_here
+            else:
+                on = key not in hidden
+            b_.configure(text=("\u25c6 " if on else "\u25c7 ") + label,
+                         fg=C["cream"] if hover == key else C["brass"] if on else DIM_TEXT)
+
+    def bar_click(key):
+        if key == "mode":  # back to a normal window
+            set_mode(False)
+            return
+        if key == "lb":
+            lb_overlay()
+        else:
+            t.cfg["overlay_hidden"] = sorted(set(t.cfg.get("overlay_hidden") or []) ^ {key})
+            save_cfg()
+            ov_refresh()
+        paint_ov_bar(key)
+
+    def lb_overlay():
+        """The leaderboard, in a window of its own in the middle of the overlay."""
+        if st.get("lb") is not None and st["lb"].winfo_exists():
+            lb_close()
+            return
+        l, tp, r, b = ov["mon"]
+        w_, h_ = min(r - l - 80, int(620 * scale())), int((b - tp) * 0.78)
+        lw = ov["lbwin"]
+        lw.geometry(f"{w_}x{h_}")
+        put(lw, l + (r - l - w_) // 2, tp + (b - tp - h_) // 2)
+        show(lw, True, activate=True)
+        lb_open(parent=lw)
+
+    def lb_hidden():
+        if ov.get("built"):
+            show(ov["lbwin"], False)
+            paint_ov_bar()
+    lb_hooks.append(lb_hidden)
+
+    def on_esc(_e=None):
+        if st.get("lb") is not None and st["lb"].winfo_exists() and st["lb"].master is ov.get("lbwin"):
+            lb_close()
+        else:
+            ov_close(why="Esc")
+
+    def spot(key):
+        """A panel's spot on Hunt's screen (from its top-left corner); the first time, side by side."""
+        saved = (t.cfg.get("overlay_panels") or {}).get(key)
+        if saved:
+            return list(saved)
+        l, tp, r, b = ov["mon"]
+        k, n = scale(), len(OVERLAY_PANELS)
+        gap = max(12, int((r - l - n * 360 * k) / (n + 1)))
+        i = [p_[0] for p_ in OVERLAY_PANELS].index(key)
+        return [int(gap + i * (360 * k + gap)), int(44 * k)]
+
+    def ov_refresh():
+        """While the overlay is up: show the panels that are switched on, redrawn when what they say changed."""
+        hidden = set(t.cfg.get("overlay_hidden") or [])
+        want = {k_ for k_, _t, _b in OVERLAY_PANELS if k_ not in hidden} if ov["open"] else set()
+        v_ = t.view() if want else None
+        for key, _title, build in OVERLAY_PANELS:
+            p_ = ov["panels"].get(key)
+            if key not in want:
+                if p_ and p_["shown"]:
+                    show(p_["win"], False)
+                    p_["shown"] = False
+                continue
+            l, tp, r, b = ov["mon"]
+            W, H, ops = build(v_, 360)
+            k = min(scale(), (b - tp) * 0.85 / H)  # a panel taller than the screen shrinks to fit
+            if ov["last"].get(key) != (W, H, k, ops):
+                ov["last"][key] = (W, H, k, ops)
+                p_["cv"].configure(width=int(W * k), height=int(H * k))
+                draw_ops(p_["cv"], W, H, ops, k)
+            if not p_["shown"]:
+                x, y = spot(key)
+                show(p_["win"], True)
+                put(p_["win"], l + x, tp + y)
+                p_["shown"] = True
+
+    def ov_tick():
+        try:
+            hw, mon = hunt_monitor(full=True)
+            if hw and hw != ov.get("toast_for"):  # Hunt (re)started: say the tracker is running
+                ov.update(toast_for=hw, hunt_hw=hw, mon=mon)
+                ov_build()
+                toast_show()
+            ov_refresh()
+        finally:
+            root.after(1000, ov_tick)
+
+    def drag(e, key, step):
+        if not ov["open"]:
+            return
+        p_ = ov["panels"][key]
+        l, tp, r, b = ov["mon"]
+        if step == "start":
+            ov["drag"] = (e.x_root, e.y_root, *spot(key))
+            u32.SetWindowPos(hwnd_of(p_["win"]), 0, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)  # above the others
+        elif step == "move" and ov["drag"]:
+            x0, y0, px, py = ov["drag"]
+            nx = min(max(0, px + e.x_root - x0), r - l - 60)  # keep a corner of it on screen
+            ny = min(max(0, py + e.y_root - y0), b - tp - 60)
+            ov["drag_to"] = (nx, ny)
+            p_["win"].geometry(f"+{l + nx}+{tp + ny}")
+        elif step == "end" and ov["drag"]:
+            ov["drag"] = None
+            if ov.get("drag_to"):
+                t.cfg.setdefault("overlay_panels", {})[key] = list(ov.pop("drag_to"))
+                save_cfg()
+
+    def ov_open(why=""):
+        log_overlay(f"open ({why})" if why else "open")
+        ov["opened_at"] = time.time()
+        hw, mon = hunt_monitor(full=True)
+        ov.update(hunt_hw=hw, mon=mon)
+        ov_build()
+        l, tp, r, b = mon
+        mw, mh = r - l, b - tp
+        ov["open"] = True
+        covered()
+        shield.events.clear()
+        shield.rect = mon
+        shield.switch(True)
+        root.after(15, shield_pump)
+        own(ov["dim"])  # Hunt's window: above the game (the rest belong to the dim layer)
+        ov["dim"].geometry(f"{mw}x{mh}")
+        ov["bar"].geometry(f"{mw}x{int(30 * scale())}")
+        show(ov["dim"], True)
+        put(ov["dim"], l, tp)
+        show(ov["bar"], True)
+        put(ov["bar"], l, tp)
+        ov_refresh()
+        paint_ov_bar()
+
+        def to_front():  # the bar gets the keys (Esc)
+            focus(hwnd_of(ov["bar"]))
+            ov["bar"].focus_force()
+        root.after(30, to_front)
+
+    def ov_close(refocus=True, why=""):
+        if not ov.get("open"):
+            return
+        log_overlay(f"close ({why}) after {time.time() - ov.get('opened_at', 0):.2f}s")
+        ov["open"] = False
+        covered()
+        shield.switch(False)
+        if st.get("lb") is not None and st["lb"].winfo_exists() and st["lb"].master is ov["lbwin"]:
+            lb_close()
+        for w_ in (ov["bar"], ov["dim"]):
+            show(w_, False)
+        ov_refresh()
+        if refocus and ov.get("hunt_hw"):
+            root.after(30, lambda: focus(ov["hunt_hw"]))
+
+    def show_main():
+        root.deiconify()
+        size, pos = t.cfg.get("window_size"), t.cfg.get("window_pos")
+        if size and pos and on_a_monitor(*pos):
+            root.geometry(f"{size[0]}x{size[1]}")
+            root.update_idletasks()
+            u32.SetWindowPos(hwnd_of(root), 0, pos[0], pos[1], 0, 0, 0x0001 | 0x0004 | 0x0040)
+        root.after(50, lambda: focus(hwnd_of(root)))
+
+    def set_mode(on):
+        """The OVERLAY button: overlay mode (window hidden, End opens the overlay) or a normal window."""
+        t.cfg["overlay_mode"] = bool(on)
+        save_cfg()
+        paint_ov_btn()
+        if on:
+            save_pos()
+            root.withdraw()
+            ov_open(why="switched to overlay")
+        else:
+            ov_close(refocus=False, why="switched to windowed")
+            show_main()
+
+    def check_overlay():
+        n = getattr(t, "overlay_presses", 0)
+        if n != st.setdefault("presses", n):
+            extra, st["presses"] = n - st["presses"], n
+            now = time.time()
+            if now - st.get("toggled_at", 0) < 0.4:  # the same press registered twice: once is enough
+                log_overlay(f"ignored a second key press {now - st['toggled_at']:.2f}s after the last")
+            else:
+                st["toggled_at"] = now
+                if ov.get("open"):
+                    ov_close(why="key")
+                elif t.cfg.get("overlay_mode"):
+                    ov_open(why="key" + (f", {extra} presses at once" if extra > 1 else ""))
+        while getattr(t, "tray_cmds", None):  # the tray icon's menu
+            cmd = t.tray_cmds.pop(0)
+            mode = bool(t.cfg.get("overlay_mode"))
+            if cmd == "quit":
+                close()
+                return
+            if cmd == "overlay":
+                set_mode(True) if not mode else ov_open(why="tray")
+            elif cmd == "windowed":
+                set_mode(False) if mode else show_main()
+            elif cmd == "open":
+                ov_open(why="tray") if mode else show_main()
+        root.after(100, check_overlay)
+
+    start_tray(t)
+    check_overlay()
+    if t.cfg.get("overlay_mode"):  # remembered: start hidden, ready for End
+        root.withdraw()
+    root.after(1500, ov_build)
+    root.after(2000, ov_tick)
     redraw(force=True)
     tick()
     root.mainloop()
@@ -4633,7 +5608,7 @@ def run_watcher() -> None:
     armed = True
     while True:
         if hunt_up():
-            if armed and not ctypes.windll.user32.FindWindowW(None, "Hunt Tracker"):
+            if armed and not ctypes.windll.user32.FindWindowW("TkTopLevel", "Hunt Tracker"):
                 subprocess.Popen(cmd, cwd=str(HERE), creationflags=0x08000000, env=clean_env())
             armed = False  # closing the tracker mid-session keeps it closed until Hunt restarts
         else:
@@ -4659,10 +5634,11 @@ def main() -> None:
     cfg = load_config()
     if FROZEN and not (args.console or args.web or args.svg):
         import ctypes
-        hw = ctypes.windll.user32.FindWindowW(None, "Hunt Tracker")
-        if hw:  # already open: bring it forward instead
-            ctypes.windll.user32.ShowWindow(hw, 9)
-            ctypes.windll.user32.SetForegroundWindow(hw)
+        hw = ctypes.windll.user32.FindWindowW("TkTopLevel", "Hunt Tracker")
+        if hw:  # already open: bring it forward instead (overlay mode: it stays hidden)
+            if not cfg.get("overlay_mode"):
+                ctypes.windll.user32.ShowWindow(hw, 9)
+                ctypes.windll.user32.SetForegroundWindow(hw)
             return
         if cfg.get("auto_update", True):
             startup_update_check()
@@ -4681,6 +5657,7 @@ def main() -> None:
              "Put the full path in hunttracker.json as \"log_path\".")
     t = Tracker(cfg, log)
     t.tidy_hunters()
+    t.tidy_players()
     seed = DATA / "money_seed.json"  # older Hunt Dollars readings to add to the money graph, once
     if seed.exists():
         try:
