@@ -2357,6 +2357,26 @@ class InputShield:
                 u32.DispatchMessageW(ctypes.byref(msg))
 
 
+def monitor_at(x: int, y: int):
+    """(left, top, right, bottom) of the work area of the monitor showing screen point (x, y), the
+    nearest one if it's off every screen. Monitors can sit left of or above the main one."""
+    import ctypes
+    from ctypes import wintypes
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+    u32 = ctypes.windll.user32
+    u32.MonitorFromPoint.restype = ctypes.c_void_p
+    mon = u32.MonitorFromPoint(wintypes.POINT(int(x), int(y)), 2)  # MONITOR_DEFAULTTONEAREST
+    mi = MONITORINFO()
+    mi.cbSize = ctypes.sizeof(MONITORINFO)
+    u32.GetMonitorInfoW(ctypes.c_void_p(mon), ctypes.byref(mi))
+    r = mi.rcWork
+    return r.left, r.top, r.right, r.bottom
+
+
 def hunt_monitor(full: bool = False):
     """(Hunt's window or None, (left, top, right, bottom) of the monitor it's on, else of the main
     monitor: its work area, or with full=True the whole screen), in the window's own pixel units."""
@@ -4857,9 +4877,11 @@ def run_window(t: Tracker) -> None:
             paint()
         pop.bind("<Escape>", close_families)
         pop.update_idletasks()
-        x = min(e.x_root, root.winfo_screenwidth() - pop.winfo_reqwidth() - 8)
-        y = min(e.y_root + 12, root.winfo_screenheight() - pop.winfo_reqheight() - 48)
-        pop.geometry(f"+{max(0, x)}+{max(0, y)}")
+        # Kept inside the monitor that was clicked (a second monitor can be right of or above the main one).
+        ml, mt, mr, mb = monitor_at(e.x_root, e.y_root)
+        x = max(ml + 8, min(e.x_root, mr - pop.winfo_reqwidth() - 8))
+        y = max(mt + 8, min(e.y_root + 12, mb - pop.winfo_reqheight() - 8))
+        pop.geometry(f"+{x}+{y}")
         pop.focus_force()
 
     root.bind("<Unmap>", close_families, add="+")

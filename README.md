@@ -41,8 +41,17 @@ click **More info → Run anyway**.
   the Statistics page; opening Statistics confirms or corrects them.
 - **Barcode names**: players whose names show as boxes (letters Hunt's font can't draw) are kept on the
   loading cards, Team Details and death screens. One unreadable name used to lose every card.
-- Fixes: after a long post-match screen the lobby and squad page stopped being read until the next
-  hunt; card titles ("Outlaw", "Survivalist") are no longer kept as players.
+- **Weapon types** can be picked like the weapon families: click **KILLS BY WEAPON TYPE ▾** on the Career
+  page to choose which show.
+- Fixes:
+  - after a long post-match screen the lobby and squad page stopped being read until the next hunt;
+  - with only your card on the squad page, the page title ("Statistics") was taken as your name, so
+    your stats, prestige and rank were never read;
+  - card titles ("Outlaw", "Survivalist") and the Steam overlay's menus are no longer kept as players;
+  - a misread weapon family ("Auto-S" for Auto-5) no longer shows up as a second family, and ones
+    already saved are merged into the real one;
+  - the weapon family / type lists open on the monitor you clicked, not always the main one;
+  - the leaderboard and diagnostics questions open on top of Hunt instead of behind it.
 
 ## What's new in 1.0.12
 
