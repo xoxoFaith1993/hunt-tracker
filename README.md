@@ -63,7 +63,11 @@ click **More info → Run anyway**.
 - Whether you're in the menus, searching, loading in, in a hunt or on the post-match screen
 - In a hunt: the time left on the mission (an estimate until you hold Tab, then synced to the map's timer)
 - Your MMR stars (from Team Details after a match), and whether they went up or down
-- Total known kills, kills with the hunter you're playing, Hunt Dollars and Blood Bonds
+- Total known kills, kills and level of the hunter you're playing (full name and skin)
+- Hunt Dollars and Blood Bonds: "+N this hunt" during a match, "−N spent" while you buy your loadout;
+  click Hunt Dollars for its graph
+
+![The Hunt Dollars graph](docs/money.png)
 
 **Today / last 7 days**
 - Hunts, time hunting and the current session length, plus a bar chart of the last 7 days
@@ -72,7 +76,7 @@ click **More info → Run anyway**.
 - Hunts tracked, time hunting, time in game, all-time hours from Steam
 - Average, longest and shortest hunt, quick leaves (under 5 minutes)
 - Hunts without a death screen, death screens per hunt, deaths to AI, average queue wait
-- Bounty Clash hunts, sessions, busiest day, hunter level
+- Bounty Clash hunts, sessions, busiest day
 
 ![A lifetime stat's graph](docs/graph.png)
 
@@ -101,7 +105,7 @@ Click **LEADERBOARD** at the top. The first time, the tracker asks whether to sh
 stats; you can switch it with **Share my stats / Stop sharing** whenever you like, and stopping
 removes your entry.
 
-- Each row shows **kills, deaths, assists and K/D**; ◂ ▸ picks the stat everyone is ranked by.
+- Everyone is ranked by **KDA**; each row shows **kills, deaths, assists, K/D and KDA**.
 - Click a player for their full card: kills, deaths, assists, K/D, KDA, wipes, headshots, bounty,
   monsters, bosses, furthest kill and maxed-out hunters.
 - Only your player name and those numbers are shared. The board lives in a free Firebase Realtime
