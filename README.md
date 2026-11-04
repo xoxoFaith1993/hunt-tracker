@@ -41,7 +41,10 @@ click **More info → Run anyway**.
   right over it), and the weapon family / type headings to pick which show, like in the window.
 - **Most kills in one hunt** has its own row.
 - **Prestige and rank** are read from your card on the lobby's squad page (the badges under your name),
-  with a bar on the Career page showing how far you are to rank 100.
+  the lobby's player banner, the Equipment page and the post-match Bloodline Progress, with a bar on
+  the Career page showing how far you are to rank 100.
+- **Teammates' and killers' rank**: your squad's prestige · rank shows on their boxes under YOUR SQUAD,
+  and whoever killed you shows theirs under KILLED BY.
 - **Diagnostics**: a report about once an hour helps find bugs (see [Your data](#your-data)); it asks once,
   and can be switched off from the icon by the clock.
 - **Career keeps counting**: your kills, deaths, K/D and KDA go up from your matches between visits to

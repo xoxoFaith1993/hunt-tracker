@@ -1510,7 +1510,7 @@ def read_death(words: list, width: int, height: int, px: bytes = b"") -> dict:
     (about 3/4 of the way, over their prestige / rank). Left side: "Killed with" and the weapon."""
     lines = [" ".join(q[4] for q in ws) for ws in ocr_lines(words)]
     right = ocr_lines([w for w in words if w[0] > width * 0.72 and w[1] < height * 0.9])
-    hunter = killer = weapon = None
+    hunter = killer = weapon = plate = None
     for i, ws in enumerate(right):
         txt = " ".join(q[4] for q in ws)
         if re.search(r"killed\s*by", txt, re.I):
@@ -1525,7 +1525,7 @@ def read_death(words: list, width: int, height: int, px: bytes = b"") -> dict:
         name = strip_kill_count(trim_name(ws))
         if len(re.sub("[^0-9A-Za-z]", "", name)) >= 2 and not DEATH_SKIP.search(name) and len(name) <= 32 \
                 and re.search("[A-Za-z]", name) and not not_a_player(name) and not number_plate(name):
-            killer = name
+            killer, plate = name, ws
     if not re.search(r"killed\s*(by|with)|death\s*screen|you'?re\s*down|distance\s*to", " ".join(lines), re.I):
         killer = None  # a loading tip ("... when the usage is complete.") isn't a death screen
     left =[_clean(" ".join(q[4] for q in ws)) for ws in ocr_lines([w for w in words if w[0] < width * 0.4])]
@@ -1562,12 +1562,107 @@ def read_death(words: list, width: int, height: int, px: bytes = b"") -> dict:
                     dist = int(m.group(1))
                     break
             break
-    return {"killer": killer, "hunter": hunter, "weapon": weapon, "dist": dist, "ai": ai, "lines": lines}
+    badges = None
+    if killer and plate and px:  # the killer's prestige / rank, in grey under their name plate
+        q = plate[0]
+        nh = max(q[3], 12)
+        badges = read_badges(px, width, q[0] - nh, q[1] + nh + 2, q[0] + nh * 10, q[1] + int(nh * 4.6))
+    return {"killer": killer, "hunter": hunter, "weapon": weapon, "dist": dist, "ai": ai, "lines": lines,
+            "badges": badges}
 
 
 MISSION_LEFT = re.compile(r"ends\s*in\s*:?\s*(\d{1,2})\s*[:.]\s*(\d{2})", re.I)
 DIGITISH = str.maketrans({"O": "0", "o": "0", "D": "0", "Q": "0", "l": "1", "I": "1", "|": "1", "S": "5",
                           "s": "5", "B": "8", "Z": "2", "z": "2", ",": "", ".": ""})
+
+
+def read_glyph_number(vals: list):
+    """A number from a small light-on-dark picture of its digits (rows of 0-255 ink), enlarged
+    to about 80px tall and shown three times (a lone short number is easily skipped by OCR): first a
+    digit's height apart, read as three numbers; also side by side like "444", split back into one.
+    -> (value or None, (glyph, width, height, digit count))."""
+    gh, gw = len(vals), len(vals[0])
+    k = max(3, round(80 / gh))  # Windows OCR reads small digits best smooth and big
+    peak = max(max(r_) for r_ in vals) or 1
+    vals = [[min(255, v * 255 // peak) for v in r_] for r_ in vals]  # faint red brought up to full
+    GW, GH = gw * k, gh * k
+    glyph = []  # the digits enlarged smoothly (bilinear): blocky pixels confuse OCR
+    for Y in range(GH):
+        fy = min(max((Y + 0.5) / k - 0.5, 0), gh - 1)
+        y_0 = int(fy)
+        y_1, ty = min(y_0 + 1, gh - 1), fy - int(fy)
+        row = bytearray()
+        for X in range(GW):
+            fx = min(max((X + 0.5) / k - 0.5, 0), gw - 1)
+            x_0 = int(fx)
+            x_1, tx = min(x_0 + 1, gw - 1), fx - int(fx)
+            v = ((vals[y_0][x_0] * (1 - tx) + vals[y_0][x_1] * tx) * (1 - ty)
+                 + (vals[y_1][x_0] * (1 - tx) + vals[y_1][x_1] * tx) * ty)
+            row += bytes((int(v), int(v), int(v), 255))
+        glyph.append(bytes(row))
+
+    def read(gap):
+        edge = GH // 2
+        one = GW + gap
+        W, H = one * 3 + 2 * edge, GH + 2 * edge
+        out = bytearray(bytes((0, 0, 0, 255)) * (W * H))  # solid black
+        for c in range(3):
+            for Y, row in enumerate(glyph):
+                start = ((edge + Y) * W + edge + c * one) * 4
+                out[start:start + len(row)] = row
+        return [q[4].translate(DIGITISH) for q in (ocr_pixels(W, H, bytes(out)) or [])]
+
+    # How many digits: separate shapes across the badge (a lone "4" is one, "55" is two).
+    lit = [any(vals[yy][xx] > 90 for yy in range(gh)) for xx in range(gw)]
+    digits = sum(1 for i, on in enumerate(lit) if on and (i == 0 or not lit[i - 1])) or 1
+
+    if digits == 1 and gw <= 0.45 * gh:
+        return 1, (glyph, GW, GH, digits)  # a lone narrow "1": OCR skips it or calls it 0
+
+    def one_number(txt):  # the three copies can come back as one number: "444" is 4
+        if len(txt) == 3 * digits and txt == txt[:digits] * 3:
+            return txt[:digits]
+        return txt if len(txt) == digits else None
+
+    # Read at a few spacings and keep the answer most of them give: Windows OCR sometimes reads a
+    # clear "4 4 4" as "ooo" at one spacing and correctly at another.
+    reads = []
+    for gap in (GH, GH // 3, max(4, GH // 8)):
+        words_ = [r_ for r_ in read(gap) if r_.isdigit()]
+        got_ = [one_number(r_) for r_ in words_] + [one_number("".join(words_))]
+        reads += [r_ for r_ in got_ if r_]
+    value = int(max(set(reads), key=reads.count)) if reads else None
+    return value, (glyph, GW, GH, digits)
+
+
+def read_bloodline_rank(words: list, w: int, h: int, px: bytes, me: str):
+    """Your rank from the post-match summary's Bloodline Progress: the white number in the red box at
+    the left of the bar under your name (OCR reads it as junk like "1=60" on the red)."""
+    bl = next((q for q in words if q[4].lower() == "bloodline"), None)
+    if not bl or not px or not me:
+        return None
+    q = next((q for q in words if bl[1] < q[1] < bl[1] + bl[3] * 5 and abs(q[0] - bl[0]) < bl[3] * 3
+              and player_key(q[4]) == me), None)
+    if not q:
+        return None
+    nh = max(q[3], 12)
+    X0, Y0, X1, Y1 = max(0, q[0] - nh * 2), q[1] + nh + 2, min(w, q[0] + nh * 6), min(h, q[1] + nh * 4)
+    red = [(x, y) for y in range(Y0, Y1) for x in range(X0, X1) for i in [(y * w + x) * 4]
+           if px[i + 2] >= 100 and px[i + 2] - max(px[i], px[i + 1]) >= 50]
+    if len(red) < 40:
+        return None
+    a, b = min(x for x, _ in red), max(x for x, _ in red)
+    top, bot = min(y for _, y in red), max(y for _, y in red)
+    lit = [(x, y) for y in range(top, bot + 1) for x in range(a, b + 1) for i in [(y * w + x) * 4]
+           if min(px[i], px[i + 1], px[i + 2]) >= 150]
+    if not lit:
+        return None
+    la, lb = max(a, min(x for x, _ in lit) - 1), min(b, max(x for x, _ in lit) + 1)
+    lt, lo = max(top, min(y for _, y in lit) - 1), min(bot, max(y for _, y in lit) + 1)
+    vals = [[max(0, min(255, int((min(px[i], px[i + 1], px[i + 2]) - 60) * 2.2)))
+             for x in range(la, lb + 1) for i in [(y * w + x) * 4]] for y in range(lt, lo + 1)]
+    rank, _ = read_glyph_number(vals)
+    return rank if rank and 1 <= rank <= 100 else None
 
 
 def read_badges(px: bytes, w: int, x0: int, y0: int, x1: int, y1: int):
@@ -1580,7 +1675,11 @@ def read_badges(px: bytes, w: int, x0: int, y0: int, x1: int, y1: int):
     if x1 - x0 < 10 or y1 - y0 < 6:
         return None
 
+    grey: list = []  # grey mode: [threshold, background, brightest], set from the badge row itself
+
     def kind(b, g, r):
+        if grey:
+            return "grey" if min(r, g, b) >= grey[0] and max(r, g, b) - min(r, g, b) < 40 else None
         if r >= 100 and r - max(g, b) >= 60:
             return "red"
         if min(r, g, b) >= 150 and max(r, g, b) - min(r, g, b) < 30:  # white, not the hunter's pale gold
@@ -1589,33 +1688,71 @@ def read_badges(px: bytes, w: int, x0: int, y0: int, x1: int, y1: int):
 
     def ink(b, g, r, colour):
         """How strongly a pixel is that colour, 0-255 (keeps the digits' soft edges for OCR)."""
+        if colour == "grey":
+            return max(0, min(255, int((min(r, g, b) - grey[1]) * 255 / max(1, grey[2] - grey[1]))))
         v = r - max(g, b) if colour == "red" else min(r, g, b)
         return max(0, min(255, int((v - (25 if colour == "red" else 60)) * 2.2)))
 
-    cols = []  # per x: the colour most of that column's coloured pixels have (icons have grey edges)
-    for x in range(x0, x1):
-        n = {"red": 0, "white": 0}
-        for y in range(y0, y1):
-            i = (y * w + x) * 4
-            k = kind(px[i], px[i + 1], px[i + 2])
-            if k:
-                n[k] += 1
-        cols.append("red" if n["red"] >= 2 and n["red"] >= n["white"] else "white" if n["white"] >= 3 else None)
-    runs: list = []  # [colour, first x, last x], neighbours closer than 4px joined
-    for i, k in enumerate(cols):
-        if k is None:
-            continue
-        x = x0 + i
-        if runs and runs[-1][0] == k and x - runs[-1][2] <= 4:
-            runs[-1][2] = x
-        else:
-            runs.append([k, x, x])
+    def find_runs():
+        cols = []  # per x: the colour most of that column's coloured pixels have (icons have grey edges)
+        for x in range(x0, x1):
+            n = {"red": 0, "white": 0, "grey": 0}
+            for y in range(y0, y1):
+                i = (y * w + x) * 4
+                k = kind(px[i], px[i + 1], px[i + 2])
+                if k:
+                    n[k] += 1
+            cols.append("red" if n["red"] >= 2 and n["red"] >= n["white"] else "white" if n["white"] >= 3
+                        else "grey" if n["grey"] >= 3 else None)
+        runs_: list = []  # [colour, first x, last x], neighbours closer than 4px joined
+        for i, k in enumerate(cols):
+            if k is None:
+                continue
+            x = x0 + i
+            if runs_ and runs_[-1][0] == k and x - runs_[-1][2] <= 4:
+                runs_[-1][2] = x
+            else:
+                runs_.append([k, x, x])
+        return runs_
+    runs = find_runs()
     reds = [r_ for r_ in runs if r_[0] == "red"]
     whites = [r_ for r_ in runs if r_[0] == "white" and reds and r_[1] > reds[0][2]]
-    if len(reds) < 2 or len(whites) < 2:
-        return None
-    prestige_runs = [r_ for r_ in reds[1:] if r_[2] < whites[0][1]]
-    rank_runs = whites[1:]
+    p_colour = r_colour = "red"
+    if len(reds) >= 2 and len(whites) >= 2:
+        r_colour = "white"
+        prestige_runs = [r_ for r_ in reds[1:] if r_[2] < whites[0][1]]
+        rank_runs = whites[1:]
+    else:
+        # The lobby's player banner and a killer's name plate draw it all in grey (sometimes faded,
+        # over light cloth): medal, prestige, skull, rank. "Grey" is set by how bright this row's
+        # marks are against its background. The two icons are the tall shapes; the digits after each
+        # are its number.
+        mins = sorted(min(px[i], px[i + 1], px[i + 2]) for y in range(y0, y1) for x in range(x0, x1)
+                      for i in [(y * w + x) * 4] if max(px[i], px[i + 1], px[i + 2]) - min(px[i], px[i + 1], px[i + 2]) < 40)
+        if not mins:
+            return None
+        bg, hi = mins[len(mins) // 2], mins[int(len(mins) * 0.98)]
+        if hi - bg < 35:
+            return None
+        grey[:] = [bg + (hi - bg) * 0.45, bg, hi]
+        greys = [r_ for r_ in find_runs() if r_[0] == "grey"]
+
+        def tall(r_):  # rows with 2+ marks, so a stray bright pixel above doesn't count
+            ys = [y for y in range(y0, y1)
+                  if sum(kind(*px[(y * w + x) * 4:(y * w + x) * 4 + 3]) == "grey" for x in range(r_[1], r_[2] + 1)) >= 2]
+            return max(ys) - min(ys) + 1 if ys else 0
+        hs = [tall(r_) for r_ in greys]
+        dh = max(1, min(hs)) if hs else 1  # a digit's height
+        icons = [i for i, hh in enumerate(hs) if hh >= 1.4 * dh]  # taller than the digits
+        if len(icons) < 2 or icons[0] != 0:
+            return None
+        rank_runs = []  # the rank's digits: up to the next tall shape or wide gap (cloth behind a plate)
+        for i in range(icons[1] + 1, len(greys)):
+            if hs[i] >= 1.4 * dh or (rank_runs and greys[i][1] - rank_runs[-1][2] > 0.6 * dh):
+                break
+            rank_runs.append(greys[i])
+        prestige_runs, p_colour = greys[1:icons[1]], "grey"
+        r_colour = "grey"
     if not prestige_runs or not rank_runs:
         return None
 
@@ -1631,59 +1768,12 @@ def read_badges(px: bytes, w: int, x0: int, y0: int, x1: int, y1: int):
         top, bot = max(y0, min(ys) - 1), min(y1 - 1, max(ys) + 1)
         a, b = max(x0, a - 1), min(x1 - 1, b + 1)
         gw, gh = b - a + 1, bot - top + 1
-        k = max(3, round(80 / gh))  # about 80px tall: Windows OCR reads small digits best smooth and big
         vals = [[ink(*px[((top + yy) * w + a + xx) * 4:((top + yy) * w + a + xx) * 4 + 3], colour)
                  for xx in range(gw)] for yy in range(gh)]
-        peak = max(max(r_) for r_ in vals) or 1
-        vals = [[min(255, v * 255 // peak) for v in r_] for r_ in vals]  # faint red brought up to full
-        GW, GH = gw * k, gh * k
-        glyph = []  # the digits enlarged smoothly (bilinear): blocky pixels confuse OCR
-        for Y in range(GH):
-            fy = min(max((Y + 0.5) / k - 0.5, 0), gh - 1)
-            y_0 = int(fy)
-            y_1, ty = min(y_0 + 1, gh - 1), fy - int(fy)
-            row = bytearray()
-            for X in range(GW):
-                fx = min(max((X + 0.5) / k - 0.5, 0), gw - 1)
-                x_0 = int(fx)
-                x_1, tx = min(x_0 + 1, gw - 1), fx - int(fx)
-                v = ((vals[y_0][x_0] * (1 - tx) + vals[y_0][x_1] * tx) * (1 - ty)
-                     + (vals[y_1][x_0] * (1 - tx) + vals[y_1][x_1] * tx) * ty)
-                row += bytes((int(v), int(v), int(v), 255))
-            glyph.append(bytes(row))
+        return read_glyph_number(vals)
 
-        def read(gap):
-            edge = GH // 2
-            one = GW + gap
-            W, H = one * 3 + 2 * edge, GH + 2 * edge
-            out = bytearray(bytes((0, 0, 0, 255)) * (W * H))  # solid black
-            for c in range(3):
-                for Y, row in enumerate(glyph):
-                    start = ((edge + Y) * W + edge + c * one) * 4
-                    out[start:start + len(row)] = row
-            return [q[4].translate(DIGITISH) for q in (ocr_pixels(W, H, bytes(out)) or [])]
-
-        # How many digits: separate shapes across the badge (a lone "4" is one, "55" is two).
-        lit = [any(vals[yy][xx] > 90 for yy in range(gh)) for xx in range(gw)]
-        digits = sum(1 for i, on in enumerate(lit) if on and (i == 0 or not lit[i - 1])) or 1
-
-        def one_number(txt):  # the three copies can come back as one number: "444" is 4
-            if len(txt) == 3 * digits and txt == txt[:digits] * 3:
-                return txt[:digits]
-            return txt if len(txt) == digits else None
-
-        # Read at a few spacings and keep the answer most of them give: Windows OCR sometimes reads a
-        # clear "4 4 4" as "ooo" at one spacing and correctly at another.
-        reads = []
-        for gap in (GH, GH // 3, max(4, GH // 8)):
-            words_ = [r_ for r_ in read(gap) if r_.isdigit()]
-            got_ = [one_number(r_) for r_ in words_] + [one_number("".join(words_))]
-            reads += [r_ for r_ in got_ if r_]
-        value = int(max(set(reads), key=reads.count)) if reads else None
-        return value, (glyph, GW, GH, digits)
-
-    prestige, p_img = number("red", prestige_runs[0][1], prestige_runs[-1][2])
-    rank, r_img = number("white", rank_runs[0][1], rank_runs[-1][2])
+    prestige, p_img = number(p_colour, prestige_runs[0][1], prestige_runs[-1][2])
+    rank, r_img = number(r_colour, rank_runs[0][1], rank_runs[-1][2])
     if (prestige is None or rank is None) and p_img and r_img:
         # Some numbers (a run of 1s) aren't read on their own at all: both side by side, three
         # times ("11 100 11 100 11 100"), read as one line and taken back apart in order.
@@ -2020,6 +2110,7 @@ def start_summary_capture(t: "Tracker") -> None:
                     if cols and max(len(c["stats"]) for c in cols) >= 5:
                         t.record_players(cols, "lobby", "")
                         t.note_badges(cols, px, w)
+                        t.note_player_badges(cols, px, w)
                     else:
                         t.note_badges_by_name(lw, px, w, h)
                     continue
@@ -2041,10 +2132,12 @@ def start_summary_capture(t: "Tracker") -> None:
                         played = read_summary_hunter(words)
                         if played:
                             t.record_summary_hunter(played)
+                        t.note_bloodline(words, w, h, px)
                     elif folder == "loading_cards":
                         got = read_columns(words, h, px, w)
                         if got:
                             t.record_players(got, "cards", name)
+                            t.note_player_badges(got, px, w)
                     elif folder == "death":
                         got = read_death(words, w, h, px)
                         t.record_death(got, name)
@@ -2577,6 +2670,25 @@ class Tracker:
         self.changed_at = time.time()
         self._save()
 
+    def note_player_badges(self, cols: list, px: bytes, w: int) -> None:
+        """Teammates' prestige and rank from the badges under their names (loading cards, squad page).
+        Each player is read again at most every 5 minutes."""
+        me, now, changed = self._me(), time.time(), False
+        for c in cols:
+            if not c.get("badges") or not px or self._key(c["name"]) == me or not_a_player(c["name"]):
+                continue
+            p = self._player(c["name"])
+            if now - p.get("badges_t", 0) < 300:
+                continue
+            got = read_badges(px, w, *c["badges"])
+            p["badges_t"] = now if got else now - 280  # a miss (cards still fading in) is tried again soon
+            if got and (p.get("prestige"), p.get("rank")) != got:
+                p["prestige"], p["rank"] = got
+                changed = True
+        if changed:
+            self.changed_at = now
+            self._save()
+
     def note_badges(self, cols: list, px: bytes, w: int) -> None:
         """Your prestige and rank from the badges under your name on the lobby's squad stats page
         (loading cards don't show them), into your Career stats."""
@@ -2590,11 +2702,33 @@ class Tracker:
         """The same from any lobby page with your name near the top and the badges under it (the
         Equipment page, say)."""
         me = self._me()
-        q = next((q for q in words if q[1] < h * 0.3 and me and player_key(q[4]) == me), None)
-        if q is None or not px or time.time() < getattr(self, "_badges_next", 0):
+        spots = [q for q in words if q[1] < h * 0.45 and me and player_key(q[4]) == me]
+        if not spots or not px or time.time() < getattr(self, "_badges_next", 0):
             return
-        nh = max(q[3], 12)
-        self._save_badges(read_badges(px, w, q[0] - nh // 2, q[1] + nh + 2, q[0] + nh * 10, q[1] + int(nh * 3.1)))
+        got = None
+        for q in spots:  # your name can show more than once; the one with badges under it counts
+            nh = max(q[3], 12)
+            x0, y0, x1 = q[0] - nh // 2, q[1] + nh + 2, q[0] + nh * 10
+            # Right under the name (squad page, Equipment), or further down (the lobby's player banner).
+            got = (read_badges(px, w, x0, y0, x1, q[1] + int(nh * 3.1))
+                   or read_badges(px, w, x0, y0, x1, q[1] + int(nh * 4.6)))
+            if got:
+                break
+        self._save_badges(got)
+
+    def note_bloodline(self, words: list, w: int, h: int, px: bytes) -> None:
+        """Your rank from the post-match Bloodline Progress (prestige stays as last read)."""
+        if time.time() < getattr(self, "_bloodline_next", 0):
+            return
+        rank = read_bloodline_rank(words, w, h, px, self._me())
+        self._bloodline_next = time.time() + (6 if rank else 2)
+        c = load_career() or {}
+        if rank and rank != c.get("rank"):
+            c["rank"] = rank
+            tmp = CAREER_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(c, indent=2), encoding="utf-8")
+            tmp.replace(CAREER_PATH)
+            self.changed_at = time.time()
 
     def _save_badges(self, got) -> None:
         # A good read is checked again in a few seconds; a missed one (the page still fading in) sooner.
@@ -3040,6 +3174,8 @@ class Tracker:
         if name_score(killer) > name_score(v["name"]):
             v["name"] = killer
         v["hunter"], v["weapon"] = death.get("hunter") or v.get("hunter"), death.get("weapon") or v.get("weapon")
+        if death.get("badges"):
+            v["badges"] = list(death["badges"])
         self._tally(m)
         self.changed_at = time.time()
         self._save()
@@ -3056,6 +3192,8 @@ class Tracker:
                     continue
                 p = self._player(v["name"])  # logged first, so a misread spelling matches the same player
                 p["hunter"], p["weapon"] = v.get("hunter"), v.get("weapon")
+                if v.get("badges"):
+                    p["prestige"], p["rank"] = v["badges"]
                 winners.append(p["name"])
         m["killers"] = winners
         m["ai_killers"] = ai
@@ -3083,7 +3221,7 @@ class Tracker:
                 shown = {k: st[k] for k in [k for k in STAT_ORDER if k in st] + [k for k in st if k not in STAT_ORDER]}
             this.append({"name": p.get("name", n), "seen": encounters(p),
                          "stats": shown, "hidden": p.get("hidden", False),
-                         "mmr": p.get("mmr")})  # MMR from an earlier match's Team Details
+                         "mmr": p.get("mmr"), "prestige": p.get("prestige"), "rank": p.get("rank")})  # MMR from an earlier match's Team Details
         kills: dict = {}
         for mm in matches:
             for k in mm.get("killers", []):
@@ -3093,10 +3231,10 @@ class Tracker:
         if cur and not (squad_mode and sq["t"] > cur["key"]):
             for k in dict.fromkeys(self._key(x) for x in cur.get("killers", [])):
                 p = players.get(k, {})
-                killers.append((p.get("name", k), kills.get(k, 1), p.get("weapon")))
+                killers.append((p.get("name", k), kills.get(k, 1), p.get("weapon"), (p.get("prestige"), p.get("rank"))))
             ai_all = [a for mm in matches for a in mm.get("ai_killers", [])]
             for a in dict.fromkeys(cur.get("ai_killers", [])):
-                killers.append((f"{a} (AI)", ai_all.count(a), None))
+                killers.append((f"{a} (AI)", ai_all.count(a), None, (None, None)))
         often = sorted(((p.get("name", n), encounters(p), p.get("last", 0)) for n, p in players.items()
                         if encounters(p) > 1), key=lambda x: (-x[1], -x[2]))
         last_read = self.hist["reads"][-1] if self.hist["reads"] else None
@@ -3651,7 +3789,8 @@ def players_scene(v: dict, min_h: int = 0, W: int = 360):
         text(PAD, y, f"Started {ago(pl['match_at'])}, no player names read yet.", 12, C["dim"])
         y += 26
     for p in pl["this"]:
-        rows_n = (min(3, len(p["stats"])) or (1 if p.get("hidden") else 0)) + (1 if p.get("mmr") is not None else 0)
+        rows_n = ((min(3, len(p["stats"])) or (1 if p.get("hidden") else 0)) + (1 if p.get("mmr") is not None else 0)
+                  + (1 if p.get("rank") is not None else 0))
         rect(PAD - 4, y, W - PAD + 4, y + 22 + 17 * rows_n, C["panel"], C["inner"])
         ops.append(("hot", PAD - 4, y, W - PAD + 4, y + 22 + 17 * rows_n, "player:" + p["name"]))
         text(PAD + 4, y + 4, clip(p["name"], 19 if p["seen"] > 1 else 30), 14, C["cream"], bold=True)
@@ -3663,6 +3802,10 @@ def players_scene(v: dict, min_h: int = 0, W: int = 360):
             for i in range(6):
                 cx = W - PAD - 4 - 7 - (5 - i) * 16
                 ops.extend(mmr_star_ops(cx, yy + 7, 7.5, i < p["mmr"]))
+            yy += 17
+        if p.get("rank") is not None:
+            text(PAD + 12, yy, "Prestige · rank", 11, C["dim"])
+            text(W - PAD - 4, yy - 1, f"{p.get('prestige', '-')} · {p['rank']}", 12, C["cream"], "end", bold=True, mono=True)
             yy += 17
         if p.get("hidden") and not p["stats"]:
             text(PAD + 12, yy, "stats hidden", 11, C["dim"])
@@ -3679,13 +3822,17 @@ def players_scene(v: dict, min_h: int = 0, W: int = 360):
     if not pl["killers"]:
         text(PAD, y, "Nobody yet this match.", 12, C["dim"])
         y += 24
-    for n, c, weapon in pl["killers"][:8]:
+    for n, c, weapon, (pres, rank) in pl["killers"][:8]:
         if not n.endswith(" (AI)"):
-            ops.append(("hot", PAD - 4, y - 2, W - PAD + 4, y + (34 if weapon else 18), "player:" + n))
+            tall = 18 + (16 if weapon else 0) + (16 if rank is not None else 0)
+            ops.append(("hot", PAD - 4, y - 2, W - PAD + 4, y + tall, "player:" + n))
         text(PAD, y, clip(n, 24), 13, C["cream"])
         if c > 1:  # they've killed you before: every time, all matches
             text(W - PAD - 4, y, f"×{c}", 13, C["red"], "end", bold=True, mono=True)
         y += 18
+        if rank is not None:
+            text(PAD + 12, y, f"prestige {pres if pres is not None else '-'} · rank {rank}", 10, C["dim"])
+            y += 16
         if weapon:
             text(PAD + 12, y, f"with {clip(weapon, 32)}", 10, C["dim"])
             y += 16
@@ -3885,9 +4032,8 @@ def scene(v: dict, min_h: int = 0, W: int = 360, block_at=None, block: str = "de
             y = rows2(y, [(f"{hn}  ({n} hunt{'s' if n != 1 else ''})", k) for hn, k, n in v["hunter_table"]]) + 6
         if c.get("empty"):
             text(PAD, y, "fills in when you open your Statistics pages in Hunt", 10, C["dim"])
-        else:
-            text(PAD, y, f"from your profile, {c.get('updated', '?')}  ·  edit hunttracker_career.json", 10, C["dim"])
-        return y + 18
+            return y + 18
+        return y
 
     def star(cx, cy, r, earned):
         ops.extend(mmr_star_ops(cx, cy, r, earned))
