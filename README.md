@@ -43,8 +43,8 @@ click **More info → Run anyway**.
 - **Prestige and rank** are read from your card on the lobby's squad page (the badges under your name),
   the lobby's player banner, the Equipment page and the post-match Bloodline Progress, with a bar on
   the Career page showing how far you are to rank 100.
-- **Teammates' and killers' rank**: your squad's prestige · rank shows on their boxes under YOUR SQUAD,
-  and whoever killed you shows theirs under KILLED BY.
+- **Teammates' and killers' rank**: your squad's prestige and rank show on their boxes under YOUR SQUAD,
+  and whoever killed you shows theirs under KILLED BY, with the game's medal and skull icons.
 - **Diagnostics**: a report about once an hour helps find bugs (see [Your data](#your-data)); it asks once,
   and can be switched off from the icon by the clock.
 - **Career keeps counting**: your kills, deaths, K/D and KDA go up from your matches between visits to

@@ -3642,6 +3642,22 @@ def pct(a, b) -> str:
 STAR_ON, STAR_OFF = "#d9a640", "#4a3c2e"  # gold when earned, dark when not
 
 
+def badge_ops(x_end: float, y: float, prestige, rank, size: int = 12) -> list:
+    """Prestige and rank drawn like the game, right-aligned at x_end: a red medal and red number,
+    then a skull and white number. y is the text's top."""
+    ops, x = [], x_end
+    box = size + 4
+    for icon, val, col in (("Rank", rank, C["cream"]), ("Prestige", prestige, C["red"])):
+        if val is None:
+            continue
+        txt = str(val)
+        ops.append(("text", x, y - 1, txt, size + 1, col, "end", True, True))
+        x -= len(txt) * (size + 1) * 0.62 + 3
+        ops.append(("image", x - box, y - 3, icon, box))
+        x -= box + 10
+    return ops
+
+
 def mmr_star_ops(cx: float, cy: float, r: float, earned: bool) -> list:
     """A classic five-point MMR star."""
     import math
@@ -3805,7 +3821,7 @@ def players_scene(v: dict, min_h: int = 0, W: int = 360):
             yy += 17
         if p.get("rank") is not None:
             text(PAD + 12, yy, "Prestige · rank", 11, C["dim"])
-            text(W - PAD - 4, yy - 1, f"{p.get('prestige', '-')} · {p['rank']}", 12, C["cream"], "end", bold=True, mono=True)
+            ops.extend(badge_ops(W - PAD - 4, yy, p.get("prestige"), p["rank"], 11))
             yy += 17
         if p.get("hidden") and not p["stats"]:
             text(PAD + 12, yy, "stats hidden", 11, C["dim"])
@@ -3824,15 +3840,16 @@ def players_scene(v: dict, min_h: int = 0, W: int = 360):
         y += 24
     for n, c, weapon, (pres, rank) in pl["killers"][:8]:
         if not n.endswith(" (AI)"):
-            tall = 18 + (16 if weapon else 0) + (16 if rank is not None else 0)
+            tall = 18 + (16 if weapon else 0)
             ops.append(("hot", PAD - 4, y - 2, W - PAD + 4, y + tall, "player:" + n))
         text(PAD, y, clip(n, 24), 13, C["cream"])
+        right = W - PAD - 4
         if c > 1:  # they've killed you before: every time, all matches
-            text(W - PAD - 4, y, f"×{c}", 13, C["red"], "end", bold=True, mono=True)
-        y += 18
+            text(right, y, f"×{c}", 13, C["red"], "end", bold=True, mono=True)
+            right -= 10 * len(f"×{c}") + 14
         if rank is not None:
-            text(PAD + 12, y, f"prestige {pres if pres is not None else '-'} · rank {rank}", 10, C["dim"])
-            y += 16
+            ops.extend(badge_ops(right, y + 1, pres, rank, 11))
+        y += 18
         if weapon:
             text(PAD + 12, y, f"with {clip(weapon, 32)}", 10, C["dim"])
             y += 16
@@ -3958,10 +3975,10 @@ def scene(v: dict, min_h: int = 0, W: int = 360, block_at=None, block: str = "de
         c = v.get("career_live") or v["career"]
         hd = c.get("headline", {})
         who = c.get("name") or ("not read yet: open Statistics in Hunt's menu" if c.get("empty") else "")
-        if c.get("prestige") is not None:
-            who += f"  ·  prestige {c['prestige']}, rank {c.get('rank', '-')}"
         y = section(y, "CAREER (in-game profile)")
         text(PAD, y, who, 12, C["cream"], bold=True)
+        if c.get("prestige") is not None or c.get("rank") is not None:
+            ops.extend(badge_ops(W - PAD, y, c.get("prestige"), c.get("rank")))
         y += 20
         rank = c.get("rank")
         if isinstance(rank, int) and c.get("prestige") is not None:  # progress to rank 100 (the next prestige)
