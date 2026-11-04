@@ -1526,7 +1526,9 @@ def read_death(words: list, width: int, height: int, px: bytes = b"") -> dict:
         if len(re.sub("[^0-9A-Za-z]", "", name)) >= 2 and not DEATH_SKIP.search(name) and len(name) <= 32 \
                 and re.search("[A-Za-z]", name) and not not_a_player(name) and not number_plate(name):
             killer = name
-    left = [_clean(" ".join(q[4] for q in ws)) for ws in ocr_lines([w for w in words if w[0] < width * 0.4])]
+    if not re.search(r"killed\s*(by|with)|death\s*screen|you'?re\s*down|distance\s*to", " ".join(lines), re.I):
+        killer = None  # a loading tip ("... when the usage is complete.") isn't a death screen
+    left =[_clean(" ".join(q[4] for q in ws)) for ws in ocr_lines([w for w in words if w[0] < width * 0.4])]
     for i, txt in enumerate(left):
         if re.search(r"killed\s*with", txt, re.I):
             parts = []
@@ -2577,26 +2579,26 @@ class Tracker:
 
     def note_badges(self, cols: list, px: bytes, w: int) -> None:
         """Your prestige and rank from the badges under your name on the lobby's squad stats page
-        (loading cards don't show them), into your Career stats. Checked at most every 20 seconds."""
+        (loading cards don't show them), into your Career stats."""
         me = self._me()
         mine = next((c for c in cols if c.get("badges") and self._key(c["name"]) == me), None)
-        if not mine or not px or time.time() - getattr(self, "_badges_at", 0) < 20:
+        if not mine or not px or time.time() < getattr(self, "_badges_next", 0):
             return
-        self._badges_at = time.time()
         self._save_badges(read_badges(px, w, *mine["badges"]))
 
     def note_badges_by_name(self, words: list, px: bytes, w: int, h: int) -> None:
         """The same from any lobby page with your name near the top and the badges under it (the
-        Equipment page, say). Checked at most every 20 seconds."""
+        Equipment page, say)."""
         me = self._me()
         q = next((q for q in words if q[1] < h * 0.3 and me and player_key(q[4]) == me), None)
-        if q is None or not px or time.time() - getattr(self, "_badges_at", 0) < 20:
+        if q is None or not px or time.time() < getattr(self, "_badges_next", 0):
             return
-        self._badges_at = time.time()
         nh = max(q[3], 12)
         self._save_badges(read_badges(px, w, q[0] - nh // 2, q[1] + nh + 2, q[0] + nh * 10, q[1] + int(nh * 3.1)))
 
     def _save_badges(self, got) -> None:
+        # A good read is checked again in a few seconds; a missed one (the page still fading in) sooner.
+        self._badges_next = time.time() + (6 if got else 3)
         if not got:
             return
         c = load_career() or {}
@@ -3814,6 +3816,15 @@ def scene(v: dict, min_h: int = 0, W: int = 360, block_at=None, block: str = "de
         y = section(y, "CAREER (in-game profile)")
         text(PAD, y, who, 12, C["cream"], bold=True)
         y += 20
+        rank = c.get("rank")
+        if isinstance(rank, int) and c.get("prestige") is not None:  # progress to rank 100 (the next prestige)
+            x1 = W - PAD - 62
+            rect(PAD, y + 1, x1, y + 8, C["faint"], C["inner"])
+            fill = PAD + (x1 - PAD) * min(max(rank, 0), 100) / 100
+            if fill > PAD + 1:
+                rect(PAD + 1, y + 2, fill - 1, y + 7, C["gold"] if rank >= 100 else C["red"])
+            text(W - PAD, y - 2, f"{rank} / 100", 10, C["dim"], "end", bold=True)
+            y += 18
         dl = dict(c.get("deltas", {}))  # what went up since you last checked your stats; cleared each match
         for k_, n_ in c.get("live", {}).items():  # tracked since then; Statistics confirms or corrects it
             if n_:

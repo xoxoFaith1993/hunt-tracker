@@ -40,7 +40,8 @@ click **More info → Run anyway**.
 - In the overlay, click a player for their card, a Hunt Log stat or Hunt Dollars for its graph (it opens
   right over it), and the weapon family / type headings to pick which show, like in the window.
 - **Most kills in one hunt** has its own row.
-- **Prestige and rank** are read from your card on the lobby's squad page (the badges under your name).
+- **Prestige and rank** are read from your card on the lobby's squad page (the badges under your name),
+  with a bar on the Career page showing how far you are to rank 100.
 - **Diagnostics**: a report about once an hour helps find bugs (see [Your data](#your-data)); it asks once,
   and can be switched off from the icon by the clock.
 - **Career keeps counting**: your kills, deaths, K/D and KDA go up from your matches between visits to
@@ -62,7 +63,10 @@ click **More info → Run anyway**.
   - a teammate with a barcode name could make the squad page take the hunter row ("Cousin Jed 12")
     as player names;
   - a barcode player whose stats are all 0 was dropped from the loading cards;
-  - prestige and rank are also read from the Equipment page, and a prestige of 4 no longer misreads.
+  - prestige and rank are also read from the Equipment page, a prestige of 4 no longer misreads,
+    and a new rank shows within seconds instead of up to a minute or more.
+  - a loading-screen tip ("...when the usage is complete.") was read as a death screen and its last
+    words kept as your killer.
 
 ## What's new in 1.0.12
 
