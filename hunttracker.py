@@ -6166,11 +6166,19 @@ def run_window(t: Tracker) -> None:
             families_menu(ev, "types" if "typehead" in tags else "families")
             pop = st.get("fam_pop")
             if pop is not None and pop.winfo_exists():
+                pop.update()  # shown first: a window moved before it's shown can land top-left
                 own(pop, hwnd_of(ov["dim"]))
-                pop.update_idletasks()
                 ml, mt, mr, mb = monitor_at(x_root, y_root)  # by the click, inside its monitor
-                put(pop, max(ml + 8, min(x_root, mr - pop.winfo_reqwidth() - 8)),
-                    max(mt + 8, min(y_root + 12, mb - pop.winfo_reqheight() - 8)))
+                px_ = max(ml + 8, min(x_root, mr - pop.winfo_reqwidth() - 8))
+                py_ = max(mt + 8, min(y_root + 12, mb - pop.winfo_reqheight() - 8))
+                put(pop, px_, py_)
+
+                def settle():  # moved back after all (Tk, or Windows re-owning it): put it back
+                    if pop.winfo_exists() and (abs(pop.winfo_rootx() - px_) > 4 or abs(pop.winfo_rooty() - py_) > 4):
+                        log_overlay(f"picker drifted to {pop.winfo_rootx()},{pop.winfo_rooty()}; moved back")
+                        put(pop, px_, py_)
+                for ms in (60, 250, 800):
+                    pop.after(ms, settle)
                 pop.after(30, lambda: (focus(hwnd_of(pop)), pop.focus_force()))
             return
         hit = next((z[4] for z in getattr(w_, "hot", []) if z[0] <= x <= z[2] and z[1] <= y <= z[3]), None)
