@@ -1187,6 +1187,9 @@ def read_columns(words: list, height: int, px: bytes = b"", width: int = 0) -> l
     if re.search(r"back to game|shift\s*\+\s*tab|steam settings|achievements earned|push-to-",
                  " ".join(w[4] for w in words), re.I):
         return []  # the Steam overlay is in front: its menus aren't players
+    if re.search(r"weapon capacity|primary slot|secondary slot|tools and consumables",
+                 " ".join(w[4] for w in words), re.I):
+        return []  # the lobby's Equipment page: its "Health" row and weapon details aren't players
     lines = ocr_lines(words)
     is_num = lambda seg: all(NUM.match(q[4]) for q in seg)  # noqa: E731
 
@@ -1208,14 +1211,15 @@ def read_columns(words: list, height: int, px: bytes = b"", width: int = 0) -> l
     stat_segs = []  # (x, y, label, value)
     for ws in lines:
         for s in segments(ws):
-            if len(s) >= 2 and NUM.match(s[-1][4]):
+            zero = len(s) >= 2 and s[-1][4] in ("O", "o") and STAT_WORDS.search(" ".join(q[4] for q in s[:-1]))
+            if len(s) >= 2 and (NUM.match(s[-1][4]) or zero):  # a 0 can read as the letter ("Choke Bomb Kills O")
                 lw = s[:-1]
                 while len(lw) > 1 and len(lw[0][4]) == 1:  # a stat's icon read as a stray letter ("e Teams Wiped")
                     lw = lw[1:]
                 label = " ".join(q[4] for q in lw)
                 # A stat's label has words; the prestige / rank badges ("16 88" read as "616 988") don't.
                 if LABEL.match(label) and re.search("[A-Za-z]{2}", label):
-                    raw = s[-1][4].replace(",", "")
+                    raw = "0" if zero else s[-1][4].replace(",", "")
                     stat_segs.append((lw[0][0], s[0][1], label, float(raw) if "." in raw else int(raw)))
     if not stat_segs:
         return []
@@ -1250,6 +1254,8 @@ def read_columns(words: list, height: int, px: bytes = b"", width: int = 0) -> l
         segs = segments(ws)
         if any(is_num(s) for s in segs) or title_row(k, segs):
             continue
+        if len(segs) >= 2 and all(NUM.match(s[-1][4]) and len(s) >= 2 for s in segs):
+            continue  # the lobby's hunter row ("Cousin Jed 12  Lynch 0"), not names
         picked = []
         for cx in col_x:
             # A page title above the cards ("Statistics", with only your card showing) isn't a name.
@@ -1274,7 +1280,8 @@ def read_columns(words: list, height: int, px: bytes = b"", width: int = 0) -> l
             break
         segs = [sg for sg in segments(ws) if len(re.sub("[^0-9A-Za-z]", "", " ".join(q[4] for q in sg))) >= 3]
         below = range(k + 1, first_stat)
-        if (segs and not title_row(k, segs) and not any(is_num(sg) for sg in segs)
+        hunters = len(segs) >= 2 and all(NUM.match(sg[-1][4]) and len(sg) >= 2 for sg in segs)
+        if (segs and not hunters and not title_row(k, segs) and not any(is_num(sg) for sg in segs)
                 and (all(NUM.match(q[4]) for q in lines[k + 1])
                      or (len(below) >= 2 and badge_row(k + 1)
                          and all(badge_row(j) or title_row(j, segments(lines[j])) for j in below)))
@@ -1467,7 +1474,8 @@ DEATH_SKIP = re.compile(r"hide|show|revive|profile|player names|spectate|back to
 NOT_PLAYERS = {"achievements", "bound by blood", "statistics", "steam settings", "searching", "game", "earned",
                "push-to-talk", "push-to-mute", "settings", "loading", "ready", "invite", "new recruit",
                "seasoned hunter", "the prestigious", "meathead master", "outlaw", "butcher's bully", "mutant scum",
-               "survivalist", "hunt tracker", "hunt log", "career", "player summary", "leaderboard"}
+               "survivalist", "hunt tracker", "hunt log", "career", "player summary", "leaderboard",
+               "health", "weapon capacity", "primary slot", "secondary slot", "tools and consumables"}
 
 
 def not_a_player(name: str) -> bool:
@@ -1662,11 +1670,13 @@ def read_badges(px: bytes, w: int, x0: int, y0: int, x1: int, y1: int):
                 return txt[:digits]
             return txt if len(txt) == digits else None
 
-        reads = [one_number(r_) for r_ in read(GH) if r_.isdigit()]
-        reads = [r_ for r_ in reads if r_]
-        if not reads:
-            joined = one_number("".join(r_ for r_ in read(max(4, GH // 8)) if r_.isdigit()))
-            reads = [joined] if joined else []
+        # Read at a few spacings and keep the answer most of them give: Windows OCR sometimes reads a
+        # clear "4 4 4" as "ooo" at one spacing and correctly at another.
+        reads = []
+        for gap in (GH, GH // 3, max(4, GH // 8)):
+            words_ = [r_ for r_ in read(gap) if r_.isdigit()]
+            got_ = [one_number(r_) for r_ in words_] + [one_number("".join(words_))]
+            reads += [r_ for r_ in got_ if r_]
         value = int(max(set(reads), key=reads.count)) if reads else None
         return value, (glyph, GW, GH, digits)
 
@@ -2008,6 +2018,8 @@ def start_summary_capture(t: "Tracker") -> None:
                     if cols and max(len(c["stats"]) for c in cols) >= 5:
                         t.record_players(cols, "lobby", "")
                         t.note_badges(cols, px, w)
+                    else:
+                        t.note_badges_by_name(lw, px, w, h)
                     continue
                 shots += 1
                 if summary or folder:
@@ -2571,7 +2583,20 @@ class Tracker:
         if not mine or not px or time.time() - getattr(self, "_badges_at", 0) < 20:
             return
         self._badges_at = time.time()
-        got = read_badges(px, w, *mine["badges"])
+        self._save_badges(read_badges(px, w, *mine["badges"]))
+
+    def note_badges_by_name(self, words: list, px: bytes, w: int, h: int) -> None:
+        """The same from any lobby page with your name near the top and the badges under it (the
+        Equipment page, say). Checked at most every 20 seconds."""
+        me = self._me()
+        q = next((q for q in words if q[1] < h * 0.3 and me and player_key(q[4]) == me), None)
+        if q is None or not px or time.time() - getattr(self, "_badges_at", 0) < 20:
+            return
+        self._badges_at = time.time()
+        nh = max(q[3], 12)
+        self._save_badges(read_badges(px, w, q[0] - nh // 2, q[1] + nh + 2, q[0] + nh * 10, q[1] + int(nh * 3.1)))
+
+    def _save_badges(self, got) -> None:
         if not got:
             return
         c = load_career() or {}

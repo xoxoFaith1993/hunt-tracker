@@ -58,6 +58,11 @@ click **More info → Run anyway**.
     already saved are merged into the real one;
   - the weapon family / type lists open on the monitor you clicked, not always the main one;
   - the leaderboard and diagnostics questions open on top of Hunt instead of behind it.
+  - the lobby's Equipment page was read as a squad (a player called "Health");
+  - a teammate with a barcode name could make the squad page take the hunter row ("Cousin Jed 12")
+    as player names;
+  - a barcode player whose stats are all 0 was dropped from the loading cards;
+  - prestige and rank are also read from the Equipment page, and a prestige of 4 no longer misreads.
 
 ## What's new in 1.0.12
 
