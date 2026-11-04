@@ -2881,7 +2881,17 @@ class Tracker:
         lv = self.hist.get("hunter_levels", {}).get(cur[0]) if cur else None
         return (cur[0], lv[0], lv[1]) if lv else None
 
+    def matches_total(self) -> int:
+        """Every match read, not just the last 100 kept. Started from the matches still known (kept,
+        or listed on a player seen in them)."""
+        if "matches_total" not in self.hist:
+            keys = {m["key"] for m in self.hist["matches"]} | {
+                k for p in self.hist["players"].values() for k in p.get("matches", [])}
+            self.hist["matches_total"] = len(keys)
+        return max(self.hist["matches_total"], len(self.hist["matches"]))
+
     def new_match(self) -> None:
+        self.hist["matches_total"] = self.matches_total() + 1
         m = {"key": time.time(), "cards": [], "killers": []}
         if (self.hist.get("wallet") or {}).get("spent"):
             self.hist["wallet"]["spent"] = 0  # loaded into the match: the "-N spent" note is done
@@ -3245,7 +3255,7 @@ class Tracker:
         return {"this": this, "squad_mode": squad_mode, "mmr_warning": warn,
                 "this_killers": cur["killers"] if (cur and not new_search) else [],
                 "match_at": cur["key"] if cur else None,
-                "killers": killers, "often": often, "n_players": len(players), "n_matches": len(matches),
+                "killers": killers, "often": often, "n_players": len(players), "n_matches": self.matches_total(),
                 "last_read": last_read, "note": getattr(self, "capture_note", "")}
 
     def _mission_left(self, cur: dict, state: str, now: float) -> dict:
@@ -3646,14 +3656,15 @@ def badge_ops(x_end: float, y: float, prestige, rank, size: int = 12) -> list:
     """Prestige and rank drawn like the game, right-aligned at x_end: a red medal and red number,
     then a skull and white number. y is the text's top."""
     ops, x = [], x_end
-    box = size + 4
+    box = size + 3
+    mid = y + 0.66 * (size + 1)  # the digits' middle (y is the text's top)
     for icon, val, col in (("Rank", rank, C["cream"]), ("Prestige", prestige, C["red"])):
         if val is None:
             continue
         txt = str(val)
         ops.append(("text", x, y - 1, txt, size + 1, col, "end", True, True))
         x -= len(txt) * (size + 1) * 0.62 + 3
-        ops.append(("image", x - box, y - 3, icon, box))
+        ops.append(("image", x - box, mid - box / 2, icon, box))  # centred on the digits, like the game
         x -= box + 10
     return ops
 

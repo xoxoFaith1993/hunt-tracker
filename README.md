@@ -62,6 +62,7 @@ click **More info → Run anyway**.
     already saved are merged into the real one;
   - the weapon family / type lists open on the monitor you clicked, not always the main one, and in
     the overlay they no longer sometimes jump to the top-left corner;
+  - Player Summary's "matches read" no longer stops at 100;
   - the leaderboard and diagnostics questions open on top of Hunt instead of behind it.
   - the lobby's Equipment page was read as a squad (a player called "Health");
   - a teammate with a barcode name could make the squad page take the hunter row ("Cousin Jed 12")
