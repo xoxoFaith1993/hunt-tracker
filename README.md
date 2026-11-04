@@ -116,8 +116,6 @@ Switch with the **OVERLAY** button at the top, or right-click the icon by the cl
 - Hunt Dollars and Blood Bonds: "+N this hunt" during a match, "−N spent" while you buy your loadout;
   click Hunt Dollars for its graph
 
-![The Hunt Dollars graph](docs/money.png)
-
 **Today / last 7 days**
 - Hunts, time hunting and the current session length, plus a bar chart of the last 7 days
 
@@ -126,8 +124,6 @@ Switch with the **OVERLAY** button at the top, or right-click the icon by the cl
 - Average, longest and shortest hunt, quick leaves (under 5 minutes)
 - Hunts without a death screen, death screens per hunt, deaths to AI, average queue wait
 - Bounty Clash hunts, sessions, busiest day
-
-![A lifetime stat's graph](docs/graph.png)
 
 **Career** (read from your in-game Statistics page, squad screen and profile card)
 - Kills, deaths, assists, K/D, KDA, wipes, headshots, bounty, monsters, bosses, furthest kill; kills
@@ -139,15 +135,12 @@ Switch with the **OVERLAY** button at the top, or right-click the icon by the cl
 
 ![The Career page](docs/career.png)
 
-**Player Summary** (other players' names are blurred in these screenshots)
+**Player Summary**
 - Your squad and the other players from the loading cards, with their stats
 - Who killed you this match (players and AI) and how often they've killed you overall
 - Anyone you've met before ("encountered 3 times") and their MMR from last time
 - Click a player for their whole record: when you met, teammate or enemy, MMR, every stat read
   from their card and squad screen, and each time they killed you (hunter and weapon)
-
-![Player Summary](docs/players.png)
-![One player's record](docs/player_card.png)
 
 ## Leaderboard
 
@@ -161,9 +154,6 @@ removes your entry.
 - Only your player name and those numbers are shared. The board lives in a free Firebase Realtime
   Database; each copy of the tracker signs in anonymously and can only change its own entry
   (see [firebase_rules.json](firebase_rules.json)).
-
-![The leaderboard](docs/leaderboard.png)
-![A leaderboard card](docs/leaderboard_card.png)
 
 ## How it works
 

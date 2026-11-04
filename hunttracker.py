@@ -6059,11 +6059,17 @@ def run_window(t: Tracker) -> None:
                 ov["last"][key] = (W, H, k, ops)
                 p_["cv"].configure(width=int(W * k), height=int(H * k))
                 draw_ops(p_["cv"], W, H, ops, k)
+            x, y = spot(key)
             if not p_["shown"]:
-                x, y = spot(key)
                 show(p_["win"], True)
                 put(p_["win"], l + x, tp + y)
                 p_["shown"] = True
+            elif not ov.get("drag"):  # Tk sometimes puts a panel back top-left after a redraw: move it back
+                from ctypes import wintypes
+                rc = wintypes.RECT()
+                u32.GetWindowRect(hwnd_of(p_["win"]), ctypes.byref(rc))
+                if abs(rc.left - (l + x)) > 2 or abs(rc.top - (tp + y)) > 2:
+                    put(p_["win"], l + x, tp + y)
 
     def ov_tick():
         try:
@@ -6127,6 +6133,8 @@ def run_window(t: Tracker) -> None:
         put(ov["bar"], l, tp)
         ov_refresh()
         paint_ov_bar()
+        for ms in (250, 800):  # checked again once Tk has laid the panels out (it can move them back)
+            root.after(ms, lambda: ov_refresh() if ov["open"] else None)
 
         def to_front():  # the bar gets the keys (Esc)
             focus(hwnd_of(ov["bar"]))
