@@ -2592,6 +2592,8 @@ class Tracker:
         if is_barcode(name):  # every barcode name looks alike: one entry per match, never merged across
             m = match or (self.hist["matches"][-1] if self.hist.get("matches") else None)
             return f"{k}-{int(m['key'])}" if m else k
+        if self._is_me(k):  # you, or a misread of you: never matched to someone else's entry
+            return self._me()
         players = self.hist.get("players", {})
         if k in players or len(k) < 8:
             return k
@@ -2608,6 +2610,17 @@ class Tracker:
     def _me(self) -> str:
         """Your own player name: learned from the middle loading card, else the career file."""
         return player_key(self.cfg.get("player_name") or (load_career() or {}).get("name") or "")
+
+    def _is_me(self, k: str) -> bool:
+        """A player key that is your name, or nearly (OCR misread or cut off a letter or two)."""
+        import difflib
+        me = self._me()
+        if not me or not k:
+            return False
+        if k == me:
+            return True
+        return (len(k) >= 6 and re.sub(r"\D", "", k) == re.sub(r"\D", "", me)
+                and difflib.SequenceMatcher(None, k, me).ratio() >= 0.85)
 
     def _learn_me(self, cols: list) -> None:
         """Your card is always the middle one (loading cards and the squad stats screen). With 1 or 3
@@ -2784,13 +2797,25 @@ class Tracker:
             tmp.replace(CAREER_PATH)
 
     def tidy_players(self) -> None:
-        """Players that were really screen text (once: the overlay's own panels, read as a squad page)."""
-        junk = [k for k, p in self.hist["players"].items() if not_a_player(p.get("name", ""))]
+        """Players that were really screen text (once: the overlay's own panels, read as a squad page),
+        or really you: a misread of your name ("xoxoFai"), or a line read with your name in it."""
+        me = self._me()
+
+        def mine(n):
+            k = player_key(n)
+            return self._is_me(k) or bool(me and len(me) >= 6 and me in k and len(k) > len(me) + 3)
+        junk = [k for k, p in self.hist["players"].items()
+                if not_a_player(p.get("name", "")) or mine(p.get("name", "")) or self._is_me(k)]
         for k in junk:
             del self.hist["players"][k]
         sq = self.hist.get("squad") or {}
-        names = [n for n in sq.get("names", []) if not not_a_player(n)]
-        if junk or names != sq.get("names", []):
+        names = [n for n in sq.get("names", []) if not not_a_player(n) and not mine(n)]
+        cards_changed = False
+        for m in self.hist["matches"][-20:]:  # recent matches: you on your own cards list
+            kept = [n for n in m.get("cards", []) if not mine(n)]
+            if kept != m.get("cards", []):
+                m["cards"], cards_changed = kept, True
+        if junk or names != sq.get("names", []) or cards_changed:
             if sq:
                 sq["names"] = names
             self._save()
