@@ -3734,8 +3734,8 @@ def columns(v: dict, wide: bool) -> list:
         cols.append(lambda mh, w: scene(v, mh, w, part="top"))
         cols.append(lambda mh, w: framed_scene(v, mh, w, "CAREER", "career"))
         if v.get("players_panel"):
-            def summary(mh, w):
-                return players_scene(dict(v, detailed=False), mh, w)  # detailed is in column 1
+            def summary(mh, w, zoom=1.0):
+                return players_scene(dict(v, detailed=False), mh, w, zoom)  # detailed is in column 1
             summary.zoom = True  # drawn bigger when it has room (see full_scene)
             cols.append(summary)
         return cols
@@ -3753,14 +3753,15 @@ def full_scene(v: dict, panel_w: int = 360, wide: bool = False):
     360 is their normal width."""
     cols = columns(v, wide)
     drawn = [c(0, panel_w) for c in cols]
-    # Player Summary is usually much shorter than the others in a wide window: drawn bigger to use
-    # the room, as long as it doesn't become the tallest column (that would shrink everything).
+    # Player Summary is usually much shorter than the others in a wide window: its body (not the
+    # title) is drawn bigger to use the room, as long as it doesn't become the tallest column (that
+    # would shrink everything).
     for i, c in enumerate(cols):
         others = [d[1] for j, d in enumerate(drawn) if j != i]
-        if getattr(c, "zoom", False) and others and drawn[i][1]:
-            f = max(1.0, min(1.6, max(others) / drawn[i][1]))
+        if getattr(c, "zoom", False) and others and drawn[i][1] > 80:
+            f = max(1.0, min(1.35, (max(others) - 70) / (drawn[i][1] - 70)))
             if f > 1.01:
-                cols[i] = (lambda c0, f_: lambda mh, w: zoomed(c0, mh, w, f_))(c, f)
+                cols[i] = (lambda c0, f_: lambda mh, w: c0(mh, w, f_))(c, f)
                 drawn[i] = cols[i](0, panel_w)
     H = max(d[1] for d in drawn)
     drawn = [c(H, panel_w) if d[1] < H else d for c, d in zip(cols, drawn)]
@@ -3797,34 +3798,30 @@ def framed_scene(v: dict, min_h: int, W: int, title: str, block: str):
     return W, H, ops
 
 
-def scale_ops(ops: list, f: float) -> list:
-    """The same drawing f times bigger: positions, sizes, line widths, icons and click zones."""
+def scale_ops(ops: list, f: float, ox: float = 0, oy: float = 0) -> list:
+    """The same drawing f times bigger about (ox, oy): positions, sizes, line widths, icons, click zones."""
+    X = lambda x: ox + (x - ox) * f  # noqa: E731
+    Y = lambda y: oy + (y - oy) * f  # noqa: E731
     out = []
     for op in ops:
         k = op[0]
         if k == "rect":
-            out.append((k, op[1] * f, op[2] * f, op[3] * f, op[4] * f, op[5], op[6], op[7] * f))
+            out.append((k, X(op[1]), Y(op[2]), X(op[3]), Y(op[4]), op[5], op[6], op[7] * f))
         elif k == "line":
-            out.append((k, op[1] * f, op[2] * f, op[3] * f, op[4] * f, op[5], op[6] * f))
+            out.append((k, X(op[1]), Y(op[2]), X(op[3]), Y(op[4]), op[5], op[6] * f))
         elif k == "hot":
-            out.append((k, op[1] * f, op[2] * f, op[3] * f, op[4] * f, *op[5:]))
+            out.append((k, X(op[1]), Y(op[2]), X(op[3]), Y(op[4]), *op[5:]))
         elif k == "poly":
-            out.append((k, [c * f for c in op[1]], op[2]))
+            out.append((k, [X(c) if i % 2 == 0 else Y(c) for i, c in enumerate(op[1])], op[2]))
         elif k == "circle":
-            out.append((k, op[1] * f, op[2] * f, op[3] * f, op[4]))
+            out.append((k, X(op[1]), Y(op[2]), op[3] * f, op[4]))
         elif k == "text":
-            out.append((k, op[1] * f, op[2] * f, op[3], op[4] * f, *op[5:]))
+            out.append((k, X(op[1]), Y(op[2]), op[3], op[4] * f, *op[5:]))
         elif k == "image":
-            out.append((k, op[1] * f, op[2] * f, op[3], op[4] * f))
+            out.append((k, X(op[1]), Y(op[2]), op[3], op[4] * f))
         else:
             out.append(op)
     return out
-
-
-def zoomed(scene_fn, min_h: float, W: float, f: float):
-    """A panel laid out f times narrower, then drawn f times bigger: same width, bigger everything."""
-    _w, H, ops = scene_fn(min_h / f, W / f)
-    return W, H * f, scale_ops(ops, f)
 
 
 def shift_ops(ops: list, dx: int) -> list:
@@ -3840,7 +3837,7 @@ def shift_ops(ops: list, dx: int) -> list:
     return out
 
 
-def players_scene(v: dict, min_h: int = 0, W: int = 360):
+def players_scene(v: dict, min_h: int = 0, W: int = 360, zoom: float = 1.0):
     """PLAYER SUMMARY: who's on the loading cards this match, who killed you, who you keep meeting."""
     PAD = 16
     pl = v["pl"]
@@ -3876,6 +3873,9 @@ def players_scene(v: dict, min_h: int = 0, W: int = 360):
     line(W // 2 + 10, 44, W - PAD, 44, C["brass"])
     diamond(W // 2, 44, 4, C["brass"])
     y = 60
+    # zoom: the body below the title is laid out narrower, then drawn bigger to the full width.
+    W_full, body_at = W, len(ops)
+    W = (W_full - 2 * PAD) / zoom + 2 * PAD
     text(PAD, y, f"{pl['n_players']} players logged  ·  {pl['n_matches']} matches read", 12, C["dim"])
     y += 26
     if pl.get("mmr_warning"):
@@ -3958,6 +3958,10 @@ def players_scene(v: dict, min_h: int = 0, W: int = 360):
         what = lr.get("name") or lr.get("killer") or "no name found"
         text(PAD, y, f"last read: {lr['kind']} · {clip(what, 20)} · {ago(lr['t'])}", 10, C["dim"])
         y += 20
+    if zoom != 1.0:
+        ops[body_at:] = scale_ops(ops[body_at:], zoom, PAD, 60)
+        y = 60 + (y - 60) * zoom
+    W = W_full
     H = max(y + 10, min_h)
 
     edge = C["edge_hi"] if v["pulse"] else C["edge"]
