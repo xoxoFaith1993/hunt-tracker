@@ -31,7 +31,7 @@ from xml.sax.saxutils import escape
 
 FROZEN = getattr(sys, "frozen", False)  # the installed .exe
 # "Publish Update.bat" bumps this and uploads the build; installed copies update themselves to it.
-VERSION = "1.0.13"
+VERSION = "1.0.14"
 UPDATE_REPO = "xoxoFaith1993/hunt-tracker"
 # A one-file .exe unpacks to a temp folder that __file__ points into; the install folder is the exe's.
 HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
@@ -5126,7 +5126,24 @@ def run_window(t: Tracker) -> None:
         ml, mt, mr, mb = monitor_at(e.x_root, e.y_root)
         x = max(ml + 8, min(e.x_root, mr - pop.winfo_reqwidth() - 8))
         y = max(mt + 8, min(e.y_root + 12, mb - pop.winfo_reqheight() - 8))
+
+        def place():  # Tk's move, and Windows' own (Tk's can be undone across monitors)
+            pop.geometry(f"+{x}+{y}")
+            if os.name == "nt":
+                import ctypes
+                ctypes.windll.user32.SetWindowPos(ctypes.c_void_p(int(pop.wm_frame(), 16)), ctypes.c_void_p(-1),
+                                                  x, y, 0, 0, 0x0001 | 0x0010)  # topmost, no resize / activate
+
+        def settle():  # moved back after all (it can land top-left): put it back
+            if pop.winfo_exists() and (abs(pop.winfo_rootx() - x) > 4 or abs(pop.winfo_rooty() - y) > 4):
+                log_overlay(f"picker drifted to {pop.winfo_rootx()},{pop.winfo_rooty()} in the window; moved back")
+                place()
+
         pop.geometry(f"+{x}+{y}")
+        pop.update()  # shown before it's placed for good: a window moved before it's shown can land top-left
+        place()
+        for ms in (60, 250, 800):
+            pop.after(ms, settle)
         pop.focus_force()
 
     root.bind("<Unmap>", close_families, add="+")
