@@ -3734,7 +3734,10 @@ def columns(v: dict, wide: bool) -> list:
         cols.append(lambda mh, w: scene(v, mh, w, part="top"))
         cols.append(lambda mh, w: framed_scene(v, mh, w, "CAREER", "career"))
         if v.get("players_panel"):
-            cols.append(lambda mh, w: players_scene(dict(v, detailed=False), mh, w))  # detailed is in column 1
+            def summary(mh, w):
+                return players_scene(dict(v, detailed=False), mh, w)  # detailed is in column 1
+            summary.zoom = True  # drawn bigger when it has room (see full_scene)
+            cols.append(summary)
         return cols
     cols.append(lambda mh, w: scene(v, mh, w))
     side = side_panel(v)
@@ -3750,6 +3753,15 @@ def full_scene(v: dict, panel_w: int = 360, wide: bool = False):
     360 is their normal width."""
     cols = columns(v, wide)
     drawn = [c(0, panel_w) for c in cols]
+    # Player Summary is usually much shorter than the others in a wide window: drawn bigger to use
+    # the room, as long as it doesn't become the tallest column (that would shrink everything).
+    for i, c in enumerate(cols):
+        others = [d[1] for j, d in enumerate(drawn) if j != i]
+        if getattr(c, "zoom", False) and others and drawn[i][1]:
+            f = max(1.0, min(1.6, max(others) / drawn[i][1]))
+            if f > 1.01:
+                cols[i] = (lambda c0, f_: lambda mh, w: zoomed(c0, mh, w, f_))(c, f)
+                drawn[i] = cols[i](0, panel_w)
     H = max(d[1] for d in drawn)
     drawn = [c(H, panel_w) if d[1] < H else d for c, d in zip(cols, drawn)]
     ops, x = [], 0
@@ -3783,6 +3795,36 @@ def framed_scene(v: dict, min_h: int, W: int, title: str, block: str):
         ops.append(("line", cx, cy, cx + dx * 12, cy, C["brass"], 2))
         ops.append(("line", cx, cy, cx, cy + dy * 12, C["brass"], 2))
     return W, H, ops
+
+
+def scale_ops(ops: list, f: float) -> list:
+    """The same drawing f times bigger: positions, sizes, line widths, icons and click zones."""
+    out = []
+    for op in ops:
+        k = op[0]
+        if k == "rect":
+            out.append((k, op[1] * f, op[2] * f, op[3] * f, op[4] * f, op[5], op[6], op[7] * f))
+        elif k == "line":
+            out.append((k, op[1] * f, op[2] * f, op[3] * f, op[4] * f, op[5], op[6] * f))
+        elif k == "hot":
+            out.append((k, op[1] * f, op[2] * f, op[3] * f, op[4] * f, *op[5:]))
+        elif k == "poly":
+            out.append((k, [c * f for c in op[1]], op[2]))
+        elif k == "circle":
+            out.append((k, op[1] * f, op[2] * f, op[3] * f, op[4]))
+        elif k == "text":
+            out.append((k, op[1] * f, op[2] * f, op[3], op[4] * f, *op[5:]))
+        elif k == "image":
+            out.append((k, op[1] * f, op[2] * f, op[3], op[4] * f))
+        else:
+            out.append(op)
+    return out
+
+
+def zoomed(scene_fn, min_h: float, W: float, f: float):
+    """A panel laid out f times narrower, then drawn f times bigger: same width, bigger everything."""
+    _w, H, ops = scene_fn(min_h / f, W / f)
+    return W, H * f, scale_ops(ops, f)
 
 
 def shift_ops(ops: list, dx: int) -> list:
