@@ -63,6 +63,8 @@ click **More info → Run anyway**.
   - the weapon family / type lists open on the monitor you clicked, not always the main one, and in
     the overlay they no longer sometimes jump to the top-left corner;
   - Player Summary's "matches read" no longer stops at 100;
+  - a killer's hunter, weapon and rank are what most frames of the death screen agree on, so one
+    faded or misread frame no longer replaces them;
   - the leaderboard and diagnostics questions open on top of Hunt instead of behind it.
   - the lobby's Equipment page was read as a squad (a player called "Health");
   - a teammate with a barcode name could make the squad page take the hunter row ("Cousin Jed 12")

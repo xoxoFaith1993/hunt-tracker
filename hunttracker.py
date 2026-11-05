@@ -3183,9 +3183,17 @@ class Tracker:
         v["n"] += 1
         if name_score(killer) > name_score(v["name"]):
             v["name"] = killer
-        v["hunter"], v["weapon"] = death.get("hunter") or v.get("hunter"), death.get("weapon") or v.get("weapon")
-        if death.get("badges"):
-            v["badges"] = list(death["badges"])
+        # The hunter, weapon and badges are voted on too: one faded or misread frame ("you Centennial
+        # Pointman", a 6 read as 1) doesn't replace what the other frames agree on.
+        for field in ("hunter", "weapon", "badges"):
+            val = death.get(field)
+            if not val:
+                continue
+            seen = v.setdefault(field + "_votes", {})
+            k = json.dumps(list(val)) if field == "badges" else val
+            seen[k] = seen.get(k, 0) + 1
+            best = max(seen, key=seen.get)
+            v[field] = json.loads(best) if field == "badges" else best
         self._tally(m)
         self.changed_at = time.time()
         self._save()
