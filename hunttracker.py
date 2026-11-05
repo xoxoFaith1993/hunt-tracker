@@ -3274,10 +3274,12 @@ class Tracker:
         if cur and not (squad_mode and sq["t"] > cur["key"]):
             for k in dict.fromkeys(self._key(x) for x in cur.get("killers", [])):
                 p = players.get(k, {})
-                killers.append((p.get("name", k), kills.get(k, 1), p.get("weapon"), (p.get("prestige"), p.get("rank"))))
+                met = len(set(p.get("matches", [])) | set(p.get("seen", [])) | {cur["key"]})  # this match too
+                killers.append((p.get("name", k), kills.get(k, 1), p.get("weapon"), (p.get("prestige"), p.get("rank")),
+                                met))
             ai_all = [a for mm in matches for a in mm.get("ai_killers", [])]
             for a in dict.fromkeys(cur.get("ai_killers", [])):
-                killers.append((f"{a} (AI)", ai_all.count(a), None, (None, None)))
+                killers.append((f"{a} (AI)", ai_all.count(a), None, (None, None), 0))
         often = sorted(((p.get("name", n), encounters(p), p.get("last", 0)) for n, p in players.items()
                         if encounters(p) > 1), key=lambda x: (-x[1], -x[2]))
         last_read = self.hist["reads"][-1] if self.hist["reads"] else None
@@ -3882,9 +3884,9 @@ def players_scene(v: dict, min_h: int = 0, W: int = 360):
     if not pl["killers"]:
         text(PAD, y, "Nobody yet this match.", 12, C["dim"])
         y += 24
-    for n, c, weapon, (pres, rank) in pl["killers"][:8]:
+    for n, c, weapon, (pres, rank), met in pl["killers"][:8]:
         if not n.endswith(" (AI)"):
-            tall = 18 + (16 if weapon else 0)
+            tall = 18 + (16 if weapon or met > 1 else 0)
             ops.append(("hot", PAD - 4, y - 2, W - PAD + 4, y + tall, "player:" + n))
         text(PAD, y, clip(n, 24), 13, C["cream"])
         right = W - PAD - 4
@@ -3894,8 +3896,11 @@ def players_scene(v: dict, min_h: int = 0, W: int = 360):
         if rank is not None:
             ops.extend(badge_ops(right, y + 1, pres, rank, 11))
         y += 18
+        if met > 1:  # you've been in other matches with them (on your cards, or in Team Details)
+            text(W - PAD - 4, y, f"(encountered {met} times)", 10, C["gold"], "end", bold=True)
         if weapon:
-            text(PAD + 12, y, f"with {clip(weapon, 32)}", 10, C["dim"])
+            text(PAD + 12, y, f"with {clip(weapon, 22 if met > 1 else 32)}", 10, C["dim"])
+        if weapon or met > 1:
             y += 16
         y += 4
     y += 8
