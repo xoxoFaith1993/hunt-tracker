@@ -2826,24 +2826,43 @@ class Tracker:
         bad = re.compile(r"view|loadout|team|press|invite|ready|search", re.I)
         c = load_career() or {}
         hk = c.get("hunter_kills", {})
-        junk = [k for k in hk if bad.search(k) or looks_like_weapon(k)]
+        junk = [k for k in hk if bad.search(k) or looks_like_weapon(k) or not self.hunter_ok(k)]
         for k in junk:
             hk.pop(k)
         if junk:
             CAREER_PATH.write_text(json.dumps(c, indent=2), encoding="utf-8")
         changed = bool(junk)
+        for store in ("hunter_names", "hunter_levels"):  # a player's name once read as a hunter
+            for k in [k for k in self.hist.get(store, {}) if not self.hunter_ok(k)]:
+                self.hist[store].pop(k)
+                changed = True
         for m in self.hist["matches"]:
             hn = m.get("hunter")
             if not hn:
                 continue
-            if bad.search(hn) or looks_like_weapon(hn):
+            if bad.search(hn) or looks_like_weapon(hn) or not self.hunter_ok(hn):
                 m.pop("hunter")
+                m.pop("hunter_skin", None)
                 changed = True
             elif self.known_hunter(hn) != hn:
                 m["hunter"] = self.known_hunter(hn)
                 changed = True
         if changed:
             self._save()
+
+    def hunter_ok(self, name: str) -> bool:
+        """Whether a name read as your hunter can be one: not you, your squad or a player on the
+        cards (a squad list's names sit near the hunter on some screens), and no "LIVE"/"HIRE" tag."""
+        k = player_key(name or "")
+        if not k or re.search(r"\b(live|hire)\b", name, re.I) or self._is_me(k):
+            return False
+        names = list((self.hist.get("squad") or {}).get("names", []))
+        for m in self.hist["matches"][-20:]:
+            names += m.get("cards", [])
+        if any(player_key(n) == k for n in names):
+            return False
+        p = self.hist.get("players", {}).get(k)
+        return not (p and p.get("matches"))
 
     def known_hunter(self, hunter: str) -> str:
         """A hunter name as read, matched to one already known: a cut-off read ("Rose") is the
@@ -2861,7 +2880,7 @@ class Tracker:
         m, me = self.hist["matches"][-1], self._me()
         for p in players:
             if me and self._key(p["name"]) == me:
-                if p["hunter"]:
+                if p["hunter"] and self.hunter_ok(p["hunter"]):
                     self.record_ready_hunter(p["hunter"], p["full"], p["level"])
                     if not m.get("hunter"):
                         m["hunter"] = self.known_hunter(p["hunter"])
@@ -2879,6 +2898,8 @@ class Tracker:
     def record_ready_hunter(self, hunter: str, full: str, level=None) -> None:
         """The hunter on screen in the lobby. Switch, and the next read replaces it; the match found
         next takes whatever was last read. Its level ("11 / 50") is kept per hunter."""
+        if not self.hunter_ok(hunter):
+            return
         hunter = self.known_hunter(hunter)
         self.ready_hunter = {"hunter": hunter, "skin": full, "t": time.time()}
         # The full name as the lobby shows it ("Desert Rose: Dust Devil"); OCR sometimes reads the ":" as ".".
@@ -3131,8 +3152,10 @@ class Tracker:
 
     def record_summary_hunter(self, hunter: str) -> None:
         """The hunter you played this match, from the summary's Hunter Progress ("Desert Rose")."""
-        hunter = self.known_hunter(hunter) if hunter else hunter
-        if self.hist["matches"] and hunter and self.hist["matches"][-1].get("hunter") != hunter:
+        if not hunter or not self.hunter_ok(hunter):
+            return
+        hunter = self.known_hunter(hunter)
+        if self.hist["matches"] and self.hist["matches"][-1].get("hunter") != hunter:
             self.hist["matches"][-1]["hunter"] = hunter
             self.changed_at = time.time()
             self._save()
