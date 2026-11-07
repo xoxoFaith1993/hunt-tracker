@@ -31,7 +31,7 @@ from xml.sax.saxutils import escape
 
 FROZEN = getattr(sys, "frozen", False)  # the installed .exe
 # "Publish Update.bat" bumps this and uploads the build; installed copies update themselves to it.
-VERSION = "1.0.14"
+VERSION = "1.0.15"
 UPDATE_REPO = "xoxoFaith1993/hunt-tracker"
 # A one-file .exe unpacks to a temp folder that __file__ points into; the install folder is the exe's.
 HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
@@ -263,12 +263,21 @@ def read_game_menu(words: list, w: int, h: int):
     return players or None
 
 
+# How every hunter's name is written in Hunt: capitalised words ("Desert Rose", "The Dark Friar",
+# "Midnight's Shadow", "Hannah McGregor"), with small joining words ("of", "the", "de") allowed.
+# Player and Discord names usually aren't: "GOV PROPERTY", "xoxoFaith", "Mr_Shelby04", "bigdawgg".
+HUNTER_WORD = r"(?:[A-Z][a-z']+(?:[A-Z][a-z']+)?|of|the|de|la|le|du|von|van|der|y)"
+HUNTER_SHAPE = re.compile(rf"^{HUNTER_WORD}(?:[ \-]{HUNTER_WORD}){{0,4}}$")
+
+
 def read_summary_hunter(words: list):
     """The hunter you played, from the summary's "Hunter Progress" block: the line under it reads
     "Desert Rose: Dust Devil  31  +10445" -> "Desert Rose" (the skin after ":" is dropped)."""
     lines = [" ".join(q[4] for q in ln) for ln in ocr_lines(words)]
     for i, txt in enumerate(lines):
         if re.search(r"hunter\s*progress", txt, re.I) and i + 1 < len(lines):
+            if not re.search(r"\d", lines[i + 1]):
+                return None  # no level / XP on it: not the hunter's line
             # OCR reads the ":" before the skin as "." at times, and the level icon as "@".
             name = re.split(r"[:.@+\d]", lines[i + 1], maxsplit=1)[0].strip()
             words = name.split()
@@ -2379,7 +2388,8 @@ def start_tray(t: "Tracker") -> None:
                     ("guidItem", ctypes.c_byte * 16), ("hBalloonIcon", wintypes.HICON)]
 
     WM_TRAY = 0x8001
-    CHOICES = {1: "overlay", 2: "windowed", 3: "open", 4: "quit", 5: "diagnostics", 6: "artwork", 7: "key"}
+    CHOICES = {1: "overlay", 2: "windowed", 3: "open", 4: "quit", 5: "diagnostics", 6: "artwork", 7: "key",
+               8: "send_now"}
 
     def run():
         def proc(hwnd, msg, wp, lp):
@@ -2393,6 +2403,7 @@ def start_tray(t: "Tracker") -> None:
                     u32.AppendMenuW(menu, 0x800, 0, None)  # a separator
                     u32.AppendMenuW(menu, 0, 3, "Open")
                     u32.AppendMenuW(menu, 0x8 if t.cfg.get("diagnostics") else 0, 5, "Send diagnostics")
+                    u32.AppendMenuW(menu, 0, 8, "Send diagnostics now")
                     u32.AppendMenuW(menu, 0x8 if t.cfg.get("backdrop", True) else 0, 6, "Show artwork")
                     u32.AppendMenuW(menu, 0x800, 0, None)
                     u32.AppendMenuW(menu, 0, 4, "Quit Hunt Tracker")
@@ -2407,6 +2418,10 @@ def start_tray(t: "Tracker") -> None:
                 elif lp == 0x0203:  # double-click
                     t.tray_cmds.append("open")
                 return 0
+            if msg == 0x0113:  # WM_TIMER, every 30 s: the icon is still there? (Explorer restarts drop it)
+                if not sh.Shell_NotifyIconW(1, ctypes.byref(nid)):  # NIM_MODIFY fails once it's gone
+                    add_icon("re-added: it had gone")
+                return 0
             return u32.DefWindowProcW(hwnd, msg, wp, lp)
 
         wndproc = WNDPROC(proc)
@@ -2419,6 +2434,7 @@ def start_tray(t: "Tracker") -> None:
         # be shown or get a taskbar button.
         hwnd = u32.CreateWindowExW(0, "HuntTrackerTray", "HuntTrackerTray", 0, 0, 0, 0, 0, wintypes.HWND(-3), None,
                                    hinst, None)
+
         icon = None
         if FROZEN:
             icon = sh.ExtractIconW(hinst, sys.executable, 0)
@@ -2431,7 +2447,19 @@ def start_tray(t: "Tracker") -> None:
         nid.cbSize, nid.hWnd, nid.uID = ctypes.sizeof(NOTIFYICONDATAW), hwnd, 1
         nid.uFlags, nid.uCallbackMessage, nid.hIcon = 1 | 2 | 4, WM_TRAY, icon  # MESSAGE | ICON | TIP
         nid.szTip = "Hunt Tracker"
-        sh.Shell_NotifyIconW(0, ctypes.byref(nid))  # NIM_ADD
+
+        def add_icon(why):
+            # NIM_ADD fails while the taskbar isn't up yet (started with Windows); keep trying a while.
+            for attempt in range(30):
+                if sh.Shell_NotifyIconW(0, ctypes.byref(nid)) or sh.Shell_NotifyIconW(1, ctypes.byref(nid)):
+                    t.tray_state = f"shown ({why}, try {attempt + 1})"
+                    log_to("tray.log", t.tray_state)
+                    return
+                time.sleep(2)
+            t.tray_state = f"failed ({why}): error {k32.GetLastError()}, window {bool(hwnd)}, icon {bool(icon)}"
+            log_to("tray.log", t.tray_state)
+        add_icon("start")
+        u32.SetTimer(hwnd, 1, 30000, None)
         t.tray_remove = lambda: sh.Shell_NotifyIconW(2, ctypes.byref(nid))  # NIM_DELETE
         msg = wintypes.MSG()
         while u32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
@@ -2593,6 +2621,16 @@ def log_error(where: str, tb: str) -> None:
         path = DATA / "crash.log"
         old = path.read_text(encoding="utf-8")[-30000:] if path.exists() else ""
         path.write_text(old + time.strftime("\n[%Y-%m-%d %H:%M:%S] ") + where + "\n" + tb, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def log_to(name: str, what: str) -> None:
+    """A line in DATA/<name> (kept short), sent with diagnostics."""
+    try:
+        path = DATA / name
+        old = path.read_text(encoding="utf-8")[-20000:] if path.exists() else ""
+        path.write_text(old + time.strftime("%Y-%m-%d %H:%M:%S") + f" {what}\n", encoding="utf-8")
     except OSError:
         pass
 
@@ -2952,6 +2990,8 @@ class Tracker:
         k = player_key(name or "")
         if not k or re.search(r"\b(live|hire)\b", name, re.I) or self._is_me(k):
             return False
+        if not HUNTER_SHAPE.match(name.strip()):
+            return False
         if any(k.startswith(v) for v in VOICE_NAMES | set(self.hist.get("voice_names", []))):
             return False
         names = list((self.hist.get("squad") or {}).get("names", []))
@@ -2997,8 +3037,11 @@ class Tracker:
         """The hunter on screen in the lobby. Switch, and the next read replaces it; the match found
         next takes whatever was last read. Its level ("11 / 50") is kept per hunter."""
         if not self.hunter_ok(hunter):
+            log_to("hunters.log", f"lobby/menu: turned down {hunter!r} ({full!r})")
             return
         hunter = self.known_hunter(hunter)
+        if (getattr(self, "ready_hunter", None) or {}).get("hunter") != hunter:
+            log_to("hunters.log", f"lobby/menu: {hunter!r} from {full!r} level {level}")
         self.ready_hunter = {"hunter": hunter, "skin": full, "t": time.time()}
         # The full name as the lobby shows it ("Desert Rose: Dust Devil"); OCR sometimes reads the ":" as ".".
         rest = full[len(hunter):].lstrip(" .:") if full.lower().startswith(hunter.lower()) else ""
@@ -3251,9 +3294,12 @@ class Tracker:
     def record_summary_hunter(self, hunter: str) -> None:
         """The hunter you played this match, from the summary's Hunter Progress ("Desert Rose")."""
         if not hunter or not self.hunter_ok(hunter):
+            if hunter:
+                log_to("hunters.log", f"summary: turned down {hunter!r}")
             return
         hunter = self.known_hunter(hunter)
         if self.hist["matches"] and self.hist["matches"][-1].get("hunter") != hunter:
+            log_to("hunters.log", f"summary: {hunter!r} (was {self.hist['matches'][-1].get('hunter')!r})")
             self.hist["matches"][-1]["hunter"] = hunter
             self.changed_at = time.time()
             self._save()
@@ -4860,10 +4906,35 @@ def diag_report(t: "Tracker") -> dict:
     career.update({"mmr": t.hist["mmr"][-1][1] if t.hist.get("mmr") else None, "total_known_kills": known,
                    "best_hunt": max((m["kills"] for m in t.hist.get("matches", []) if m.get("kills")), default=None),
                    "hunts_tracked": len(hunts), "hours_hunting": round(sum(h.get("d", 0) for h in hunts) / 3600, 1)})
+    # The saved data behind what's on screen (recent matches, hunters, squad), so a wrong row can be
+    # traced to what was read. Sign-in details are never included.
+    def deaths_of(m):
+        out = []
+        for votes in (m.get("deaths") or {}).values():
+            out.append([{"name": v.get("name"), "n": v.get("n"), "ai": bool(v.get("ai")), "hunter": v.get("hunter"),
+                         "weapon": v.get("weapon"), "badges": v.get("badges")} for v in votes.values()])
+        return out
+    data = {"matches": [{"key": int(m.get("key", 0)), "hunter": m.get("hunter"), "skin": m.get("hunter_skin"),
+                         "kills": m.get("kills"), "cards": m.get("cards", []), "killers": m.get("killers", []),
+                         "ai": m.get("ai_killers", []), "deaths": deaths_of(m)} for m in t.hist.get("matches", [])[-40:]],
+            "hunter_table": [list(r) for r in t.hunter_table()], "hunter_names": t.hist.get("hunter_names", {}),
+            "hunter_levels": t.hist.get("hunter_levels", {}), "voice_names": t.hist.get("voice_names", []),
+            "squad": t.hist.get("squad"), "ready_hunter": getattr(t, "ready_hunter", None),
+            "matches_total": t.matches_total(), "tray": getattr(t, "tray_state", None),
+            "cfg": {k: v for k, v in t.cfg.items() if not k.startswith("leaderboard_") and k not in ("log_path", "host")
+                    and not isinstance(v, (dict, list))}}  # no sign-in, no paths with the Windows user name
+    # The database keeps each log under 25000 characters: the data goes as one more "log" (JSON text),
+    # with fewer matches until it fits.
+    while True:
+        data_txt = json.dumps(data, separators=(",", ":"), default=str)
+        if len(data_txt) <= 24000 or len(data["matches"]) <= 5:
+            break
+        data["matches"] = data["matches"][len(data["matches"]) // 4:]
     return {"t": int(time.time()), "v": VERSION, "name": str(t.cfg.get("player_name") or c.get("name") or "")[:40],
             "setup": setup, "counts": counts, "career": _db_keys(career),
             "logs": {"crash": _tail(DATA / "crash.log", 20000), "overlay": _tail(DATA / "overlay.log", 8000),
-                     "capture": _tail(DATA / "capture_errors.log", 20000)},
+                     "capture": _tail(DATA / "capture_errors.log", 20000), "hunters": _tail(DATA / "hunters.log", 8000),
+                     "tray": _tail(DATA / "tray.log", 4000), "data": data_txt[:24900]},
             "screens": _tail(DATA / "screen_log.jsonl", 100000)}
 
 
@@ -4885,11 +4956,11 @@ def send_issue(t: "Tracker", text: str) -> bool:
         return False
 
 
-def send_diagnostics_now(t: "Tracker") -> None:
-    """One report straight away (just switched on), in the background."""
+def send_diagnostics_now(t: "Tracker", force: bool = False) -> None:
+    """One report straight away (just switched on, or "Send diagnostics now"), in the background."""
     def run():
         try:
-            if LEADERBOARD_URL and t.cfg.get("diagnostics"):
+            if LEADERBOARD_URL and (force or t.cfg.get("diagnostics")):
                 tok = _lb_auth(t.cfg)
                 _lb_request("PUT", f"diagnostics/{t.cfg['leaderboard_id']}", diag_report(t), tok)
         except Exception:  # noqa: BLE001 - offline: the hourly one tries again
@@ -6673,6 +6744,8 @@ def run_window(t: Tracker) -> None:
                 save_cfg()
                 if t.cfg["diagnostics"]:
                     send_diagnostics_now(t)
+            elif cmd == "send_now":
+                send_diagnostics_now(t, force=True)
             elif cmd == "key":
                 change_key()
             elif cmd == "artwork":  # the picture behind the tracker's window
@@ -6770,14 +6843,19 @@ def run_watcher() -> None:
         except Exception:  # noqa: BLE001 - unsure counts as "not running" here
             return False
 
-    armed = True
+    # Opened a minute after Hunt starts, not straight away: while the game's anti-cheat is starting up,
+    # a new program looking at Hunt's window can get flagged (opening the tracker first never did).
+    delay = max(0, int(load_config().get("autostart_delay", 60)))
+    armed, up_since = True, None
     while True:
         if hunt_up():
-            if armed and not ctypes.windll.user32.FindWindowW("TkTopLevel", "Hunt Tracker"):
-                subprocess.Popen(cmd, cwd=str(HERE), creationflags=0x08000000, env=clean_env())
-            armed = False  # closing the tracker mid-session keeps it closed until Hunt restarts
+            up_since = up_since or time.time()
+            if armed and time.time() - up_since >= delay:
+                if not ctypes.windll.user32.FindWindowW("TkTopLevel", "Hunt Tracker"):
+                    subprocess.Popen(cmd, cwd=str(HERE), creationflags=0x08000000, env=clean_env())
+                armed = False  # closing the tracker mid-session keeps it closed until Hunt restarts
         else:
-            armed = True
+            armed, up_since = True, None
         time.sleep(5)
 
 
