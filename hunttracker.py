@@ -911,14 +911,77 @@ def _ocr_file_winrt(png: Path):
 
 
 def ocr_frame(w: int, h: int, bgra: bytes) -> list:
-    """OCR a grabbed frame: from memory when possible, else through a temporary PNG."""
+    """OCR a grabbed frame: from memory when possible, else through a temporary PNG. Discord's
+    overlay is taken out (see strip_voice)."""
     words = ocr_pixels(w, h, bgra)
     if words is None:
         import tempfile
         tmp = Path(tempfile.gettempdir()) / "hunttracker_frame.png"
         write_png(tmp, w, h, bgra)
         words = ocr_words(tmp)
-    return words
+    return strip_voice(words)
+
+
+# Discord's in-game overlay (who's in voice: "GOV_PROPERTY  LIVE", "White Man @ LIVE") sits over
+# Hunt's screens, and its names got read as killers, weapons and hunters. A name shown with the
+# LIVE tag is learned (kept in the history), and its words are dropped from every read after.
+# Names without the tag (someone just talking) aren't learned: they can be your squad's own names.
+VOICE_NAMES: set = set()
+VOICE_STATE = {"new": False}
+VOICE_TAG = re.compile(r"^(live|uve|ulwe|lwe|lis)$", re.I)
+VOICE_ICON = re.compile(r"^(@|®|©|•+|n|i|l|io\)|i0\)|\d*\)+)$", re.I)
+
+
+def strip_voice(words):
+    if not words:
+        return words
+    drop = set()
+    lines = ocr_lines(words)
+    for ln in lines:  # learn: the words right before a LIVE tag (capitals, on a short line: not a sentence)
+        for i, q in enumerate(ln):
+            tag = q[4].strip(".,:;!|")
+            if not (VOICE_TAG.match(tag) and tag.isupper() and len(ln) <= 7):
+                continue
+            drop.add(id(q))
+            j, name = i - 1, []
+            while j >= 0 and VOICE_ICON.match(ln[j][4]):
+                drop.add(id(ln[j]))
+                j -= 1
+            while j >= 0 and len(name) < 3 and re.search("[A-Za-z0-9]", ln[j][4]):
+                if name and name[0][0] - (ln[j][0] + ln[j][2]) > 1.5 * max(ln[j][3], 10):
+                    break
+                name.insert(0, ln[j])
+                j -= 1
+            k = player_key(" ".join(x[4] for x in name))
+            if len(k) >= 3 and k not in VOICE_NAMES:
+                VOICE_NAMES.add(k)
+                VOICE_STATE["new"] = True
+    if not VOICE_NAMES:
+        return [w for w in words if id(w) not in drop]
+    for ln in lines:  # drop: learned names (or a cut-off read of one) and the icons after them
+        i = 0
+        while i < len(ln):
+            hit = 0
+            for span in (4, 3, 2, 1):
+                part = ln[i:i + span]
+                if len(part) < span:
+                    continue
+                k = player_key(" ".join(x[4] for x in part))
+                if k in VOICE_NAMES or (len(k) >= 5 and (span > 1 or "_" in part[0][4])
+                                        and any(v.startswith(k) and v != k for v in VOICE_NAMES)):
+                    hit = span
+                    break
+            if not hit:
+                i += 1
+                continue
+            for x in ln[i:i + hit]:
+                drop.add(id(x))
+            i += hit
+            while i < len(ln) and (VOICE_ICON.match(ln[i][4]) or (VOICE_TAG.match(ln[i][4].strip(".,:;!|"))
+                                                                  and ln[i][4].strip(".,:;!|").isupper())):
+                drop.add(id(ln[i]))
+                i += 1
+    return [w for w in words if id(w) not in drop]
 
 
 def ocr_words(png: Path) -> list:
@@ -2099,6 +2162,9 @@ def start_summary_capture(t: "Tracker") -> None:
                 if sig == last_sig:
                     continue
                 last_sig = sig
+                if VOICE_STATE["new"]:  # a Discord overlay name was just learned: clear it out of the log
+                    VOICE_STATE["new"] = False
+                    t.tidy_voice()
                 if lobby and not (summary or stats or folder):
                     lobby_at = time.time()
                     lw = ocr_frame(w, h, px)
@@ -2820,6 +2886,36 @@ class Tracker:
                 sq["names"] = names
             self._save()
 
+    def tidy_voice(self) -> None:
+        """Discord overlay names saved before they were known: as killers (players or AI), players on
+        the cards, or hunters. Runs at start and whenever a new one is learned."""
+        VOICE_NAMES.update(self.hist.get("voice_names", []))
+        if not VOICE_NAMES:
+            return
+
+        def voice(n):
+            k = player_key(n or "")
+            return bool(k) and any(k.startswith(v) for v in VOICE_NAMES)
+        changed = False
+        for m in self.hist["matches"]:
+            touched = False
+            for votes in (m.get("deaths") or {}).values():
+                for k in [k for k, v in votes.items() if voice(v.get("name"))]:
+                    votes.pop(k)
+                    touched = True
+            cards = [n for n in m.get("cards", []) if not voice(n)]
+            if cards != m.get("cards", []):
+                m["cards"], touched = cards, True
+            if touched:
+                self._tally(m)
+                changed = True
+        for k in [k for k in self.hist["players"] if any(k.startswith(v) for v in VOICE_NAMES)]:
+            del self.hist["players"][k]
+            changed = True
+        if changed:
+            self._save()
+        self.tidy_hunters()
+
     def tidy_hunters(self) -> None:
         """Hunters read wrongly by earlier versions: a lobby button ("V View Team Loadouts"), a misread
         weapon, or a cut-off name ("Rose"). Wrong ones are dropped, cut-off ones get the full name."""
@@ -2855,6 +2951,8 @@ class Tracker:
         cards (a squad list's names sit near the hunter on some screens), and no "LIVE"/"HIRE" tag."""
         k = player_key(name or "")
         if not k or re.search(r"\b(live|hire)\b", name, re.I) or self._is_me(k):
+            return False
+        if any(k.startswith(v) for v in VOICE_NAMES | set(self.hist.get("voice_names", []))):
             return False
         names = list((self.hist.get("squad") or {}).get("names", []))
         for m in self.hist["matches"][-20:]:
@@ -3339,6 +3437,8 @@ class Tracker:
 
     def _save(self) -> None:
         with self.lock:
+            if VOICE_NAMES:
+                self.hist["voice_names"] = sorted(VOICE_NAMES)
             try:
                 tmp = HISTORY_PATH.with_suffix(".tmp")
                 tmp.write_text(json.dumps(self.hist), encoding="utf-8")
@@ -4785,6 +4885,18 @@ def send_issue(t: "Tracker", text: str) -> bool:
         return False
 
 
+def send_diagnostics_now(t: "Tracker") -> None:
+    """One report straight away (just switched on), in the background."""
+    def run():
+        try:
+            if LEADERBOARD_URL and t.cfg.get("diagnostics"):
+                tok = _lb_auth(t.cfg)
+                _lb_request("PUT", f"diagnostics/{t.cfg['leaderboard_id']}", diag_report(t), tok)
+        except Exception:  # noqa: BLE001 - offline: the hourly one tries again
+            pass
+    threading.Thread(target=run, daemon=True, name="diagnostics-now").start()
+
+
 def start_diagnostics(t: "Tracker") -> None:
     """Sends the diagnostics report (when it's switched on) two minutes after starting, then every hour
     if anything changed. Each copy only ever replaces its own report."""
@@ -5977,6 +6089,8 @@ def run_window(t: Tracker) -> None:
                 "You can switch this off any time: right-click the tracker's icon by the clock.",
                 yes="OK, send them", no="Don't send")
             save_cfg()
+            if t.cfg["diagnostics"]:
+                send_diagnostics_now(t)
 
     root.after(4000, lb_ask)
     root.after(8000, lb_keep_fresh)
@@ -6557,6 +6671,8 @@ def run_window(t: Tracker) -> None:
             elif cmd == "diagnostics":
                 t.cfg["diagnostics"] = not t.cfg.get("diagnostics")
                 save_cfg()
+                if t.cfg["diagnostics"]:
+                    send_diagnostics_now(t)
             elif cmd == "key":
                 change_key()
             elif cmd == "artwork":  # the picture behind the tracker's window
@@ -6707,6 +6823,7 @@ def main() -> None:
     t = Tracker(cfg, log)
     t.tidy_hunters()
     t.tidy_players()
+    t.tidy_voice()
     t.tidy_career()
     seed = DATA / "money_seed.json"  # older Hunt Dollars readings to add to the money graph, once
     if seed.exists():
