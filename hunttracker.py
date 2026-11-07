@@ -31,7 +31,7 @@ from xml.sax.saxutils import escape
 
 FROZEN = getattr(sys, "frozen", False)  # the installed .exe
 # "Publish Update.bat" bumps this and uploads the build; installed copies update themselves to it.
-VERSION = "1.0.15"
+VERSION = "1.0.16"
 UPDATE_REPO = "xoxoFaith1993/hunt-tracker"
 # A one-file .exe unpacks to a temp folder that __file__ points into; the install folder is the exe's.
 HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
@@ -1556,7 +1556,8 @@ def not_a_player(name: str) -> bool:
     return (n in NOT_PLAYERS or n.startswith("push-") or n.startswith("game re")
             or re.fullmatch(r"\w+ kills?", n) is not None
             or re.search(r"achievement|steam|back to game|in game|\bclip\b|settings|earned", n) is not None
-            or re.fullmatch(r"log \d+[smh]? ago", n) is not None)  # the tracker's own "log 86s ago"
+            or re.fullmatch(r"log \d+[smh]? ago", n) is not None  # the tracker's own "log 86s ago"
+            or (sum(ch.isalpha() for ch in n) < 2 and BOX not in n))  # the badge row ("100", "612 a 51")
 
 
 def number_plate(name: str) -> bool:
@@ -2742,9 +2743,18 @@ class Tracker:
         now = time.time()
         p = self.hist["players"].setdefault(self._key(name), {"name": name, "matches": [], "stats": {},
                                                               "first": now, "rough_name": rough})
-        if (p.get("rough_name") and not rough) or (rough == p.get("rough_name", False)
-                                                   and name_score(name) > name_score(p["name"])):
-            p["name"], p["rough_name"] = name, rough  # keep the cleanest spelling seen
+        if rough:
+            if p.get("rough_name") and name_score(name) > name_score(p["name"]):
+                p["name"] = name  # lobby reads only: the cleanest one so far
+        else:
+            # The spelling read most often is shown: one stray icon read into a name ("LrxoxoFaith")
+            # doesn't replace the one the loading cards keep showing.
+            sp = p.setdefault("spellings", {})
+            sp[name] = sp.get(name, 0) + 1
+            if len(sp) > 8:
+                sp.pop(min(sp, key=sp.get))
+            p["name"] = max(sp, key=lambda n: (sp[n], name_score(n)))
+            p["rough_name"] = False
         p["last"] = now
         return p
 
@@ -2970,6 +2980,26 @@ class Tracker:
             for k in [k for k in self.hist.get(store, {}) if not self.hunter_ok(k)]:
                 self.hist[store].pop(k)
                 changed = True
+        # Misread spellings of one hunter, rarest first, folded into the spelling played most.
+        counts: dict = {}
+        for m in self.hist["matches"]:
+            if m.get("hunter"):
+                counts[m["hunter"]] = counts.get(m["hunter"], 0) + 1
+        names_ = set(counts) | set(self.hist.get("hunter_names", {}))
+        for hn in sorted(names_, key=lambda k: counts.get(k, 0)):
+            to = self.known_hunter(hn)
+            if to == hn:
+                continue
+            for m in self.hist["matches"]:
+                if m.get("hunter") == hn:
+                    m["hunter"] = to
+            for store in ("hunter_names", "hunter_levels"):
+                st = self.hist.get(store, {})
+                if hn in st:
+                    val = st.pop(hn)
+                    st.setdefault(to, val if store == "hunter_levels" else val.replace(hn, to, 1))
+            counts[to] = counts.get(to, 0) + counts.pop(hn, 0)
+            changed = True
         for m in self.hist["matches"]:
             hn = m.get("hunter")
             if not hn:
@@ -3005,10 +3035,24 @@ class Tracker:
     def known_hunter(self, hunter: str) -> str:
         """A hunter name as read, matched to one already known: a cut-off read ("Rose") is the
         hunter it's the end or start of ("Desert Rose")."""
-        known = set((load_career() or {}).get("hunter_kills", {})) | {
-            m["hunter"] for m in self.hist["matches"] if m.get("hunter")}
+        import difflib
+        played: dict = {}
+        for m in self.hist["matches"]:
+            if m.get("hunter"):
+                played[m["hunter"]] = played.get(m["hunter"], 0) + 1
+        known = set((load_career() or {}).get("hunter_kills", {})) | set(played)
         hits = [k for k in known if k.lower().endswith(" " + hunter.lower()) or k.lower().startswith(hunter.lower() + " ")]
-        return hits[0] if len(hits) == 1 else hunter
+        if len(hits) == 1:
+            return hits[0]
+        # OCR misread a letter or two ("Nlidnight's Shadow" for Midnight's Shadow): the known spelling
+        # played most wins.
+        close = [k for k in known if k != hunter and abs(len(k) - len(hunter)) <= 2
+                 and difflib.SequenceMatcher(None, k.lower(), hunter.lower()).ratio() >= 0.85]
+        if close:
+            best = max(close, key=lambda k: played.get(k, 0))
+            if played.get(best, 0) >= played.get(hunter, 0):
+                return best
+        return hunter
 
     def record_game_menu(self, players: list) -> None:
         """The in-match Game Menu: your hunter and level for this match, and your squad if the loading
