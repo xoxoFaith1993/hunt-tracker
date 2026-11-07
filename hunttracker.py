@@ -31,7 +31,7 @@ from xml.sax.saxutils import escape
 
 FROZEN = getattr(sys, "frozen", False)  # the installed .exe
 # "Publish Update.bat" bumps this and uploads the build; installed copies update themselves to it.
-VERSION = "1.0.16"
+VERSION = "1.0.17"
 UPDATE_REPO = "xoxoFaith1993/hunt-tracker"
 # A one-file .exe unpacks to a temp folder that __file__ points into; the install folder is the exe's.
 HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
@@ -169,6 +169,10 @@ def apply_live(c: dict, kills: int, deaths: int) -> dict:
     summaries, deaths from death screens), with K/D and KDA worked out again the game's way:
     K/D = kills / deaths, KDA = (kills + assists) / deaths. c["live"] says how much was added."""
     hd = (c or {}).get("headline", {})
+    if "K/D" not in hd and hd.get("Players Killed") is not None and hd.get("Killed by Player"):
+        c = json.loads(json.dumps(c))
+        hd = c["headline"]
+        hd["K/D"] = round(hd["Players Killed"] / hd["Killed by Player"], 2)
     if "Players Killed" not in hd or not (kills or deaths):
         return c
     c = json.loads(json.dumps(c))
@@ -287,6 +291,10 @@ def read_summary_hunter(words: list):
             if re.search(r"progress|summary|bloodline|mission|bounty|killed", name, re.I):
                 return None  # another heading, not a hunter
             return name if re.fullmatch(r"[A-Za-z][A-Za-z .'\-]{2,}", name) else None
+    for i, txt in enumerate(lines):  # you died: "You died." with the hunter's name on the next line
+        if re.fullmatch(r"\W*you\s*died\W*", txt, re.I) and i + 1 < len(lines):
+            name = lines[i + 1].split(":")[0].strip()
+            return name if HUNTER_SHAPE.match(name) else None
     return None
 
 
@@ -1547,7 +1555,8 @@ NOT_PLAYERS = {"achievements", "bound by blood", "statistics", "steam settings",
                "push-to-talk", "push-to-mute", "settings", "loading", "ready", "invite", "new recruit",
                "seasoned hunter", "the prestigious", "meathead master", "outlaw", "butcher's bully", "mutant scum",
                "survivalist", "hunt tracker", "hunt log", "career", "player summary", "leaderboard",
-               "health", "weapon capacity", "primary slot", "secondary slot", "tools and consumables"}
+               "health", "weapon capacity", "primary slot", "secondary slot", "tools and consumables",
+               "hellborn tracker", "bloodthirsty"}
 
 
 def not_a_player(name: str) -> bool:
@@ -1557,7 +1566,12 @@ def not_a_player(name: str) -> bool:
             or re.fullmatch(r"\w+ kills?", n) is not None
             or re.search(r"achievement|steam|back to game|in game|\bclip\b|settings|earned", n) is not None
             or re.fullmatch(r"log \d+[smh]? ago", n) is not None  # the tracker's own "log 86s ago"
-            or (sum(ch.isalpha() for ch in n) < 2 and BOX not in n))  # the badge row ("100", "612 a 51")
+            or (sum(ch.isalpha() for ch in n) < 2 and BOX not in n)  # the badge row ("100", "612 a 51")
+            or re.match(r"(?:damage|healing)\b", n) is not None  # the Damage History tab ("Damage -123")
+            # ...and its "Damage" misread: "Danlagc", "l)unagc", "Dann-agc", "L)'.llnage"
+            or (len(n) <= 12 and re.fullmatch(r"[dl][a-z)'.\-]{1,6}ag[ec]", n) is not None)
+            # a Career line read as a name: "Teams Wiped 2237", "Kills/ Deaths/ Assists 1.23"
+            or (re.search(r"\d", n) is not None and re.search(r"wiped|targets killed|assists|deaths/", n) is not None))
 
 
 def number_plate(name: str) -> bool:
@@ -1577,6 +1591,19 @@ def _clean(txt: str) -> str:
     return re.sub(r"^[^0-9A-Za-z\[(]+|[^0-9A-Za-z_\])]+$", "", txt).strip()
 
 
+def clean_weapon(txt: str) -> str:
+    """The Discord overlay's text mixed into the weapon line: "GOV_PROPERTYVetterli 71 White Man @ LIVE",
+    "LeMat Carbine GOV_PROPERTY", "TYOfficer Carbine" (the speaker icon read as letters)."""
+    txt = re.sub(r"\s*@?\s*\b(?:LIVE|UVE)\b.*$", "", txt)  # a voice tag and everything after it
+    txt = re.sub(r"[A-Z0-9]+_[A-Z0-9_]+?(?=[A-Z][a-z]|\b|$)", " ", txt)  # GOV_PROPERTY-style names
+    for fam in sorted(list(FAMILY_CLASS) + ["Carbine"], key=len, reverse=True):
+        i = txt.find(fam)
+        if 0 < i <= 3 and txt[:i].isupper() and " " not in txt[:i]:
+            txt = txt[i:]
+            break
+    return re.sub(r"\s+", " ", txt).strip()
+
+
 def read_death(words: list, width: int, height: int, px: bytes = b"") -> dict:
     """A death screen -> {"killer", "hunter", "weapon", "dist", "lines"}.
     Right side: "Killed by" and the killer's hunter near the top, the killer's player name low down
@@ -1590,6 +1617,8 @@ def read_death(words: list, width: int, height: int, px: bytes = b"") -> dict:
             rest = _clean(re.split(r"killed\s*by\s*:?", txt, flags=re.I)[-1])
             nxt = _clean(" ".join(q[4] for q in right[i + 1])) if i + 1 < len(right) else ""
             hunter = rest or nxt or None
+            if hunter and not re.search("[A-Za-z]{3}", hunter):
+                hunter = None  # the level icon ("9"), not a hunter
             break
     # Only the name plate counts: a teammate's voice-chat bubble sits much higher on the right.
     for ws in right:
@@ -1599,8 +1628,12 @@ def read_death(words: list, width: int, height: int, px: bytes = b"") -> dict:
         if len(re.sub("[^0-9A-Za-z]", "", name)) >= 2 and not DEATH_SKIP.search(name) and len(name) <= 32 \
                 and re.search("[A-Za-z]", name) and not not_a_player(name) and not number_plate(name):
             killer, plate = name, ws
-    if not re.search(r"killed\s*(by|with)|death\s*screen|you'?re\s*down|distance\s*to", " ".join(lines), re.I):
+    joined = " ".join(lines)
+    if not re.search(r"killed\s*(by|with)|death\s*screen|you'?re\s*down|distance\s*to", joined, re.I):
         killer = None  # a loading tip ("... when the usage is complete.") isn't a death screen
+    if re.search(r"strike\s*distance|\((?:in|out)bound\)|(?:downed|damaged|healed)\s*by", joined, re.I) \
+            and not re.search(r"killed\s*with", joined, re.I):
+        killer = None  # the Damage History tab: "Damage" / "Healing" (misread "Danlagc") where the name goes
     left =[_clean(" ".join(q[4] for q in ws)) for ws in ocr_lines([w for w in words if w[0] < width * 0.4])]
     for i, txt in enumerate(left):
         if re.search(r"killed\s*with", txt, re.I):
@@ -1609,7 +1642,7 @@ def read_death(words: list, width: int, height: int, px: bytes = b"") -> dict:
                 if not nxt or re.search(r"distance|related|traits", nxt, re.I):
                     break
                 parts.append(nxt)
-            weapon = " ".join(parts) or None
+            weapon = clean_weapon(" ".join(parts)) or None
             break
     # Killed by a monster (or fire, poison...): "Killed by" sits on the left with its name under it,
     # there's no player name plate, and the monster's card is top right.
@@ -2850,6 +2883,10 @@ class Tracker:
         rank = read_bloodline_rank(words, w, h, px, self._me())
         self._bloodline_next = time.time() + (6 if rank else 2)
         c = load_career() or {}
+        if rank:
+            if rank != c.get("rank"):
+                log_to("rank.log", f"bloodline: rank {rank} (was {c.get('rank')})")
+            self._bloodline_rank = (rank, time.time())
         if rank and rank != c.get("rank"):
             c["rank"] = rank
             tmp = CAREER_PATH.with_suffix(".tmp")
@@ -2862,8 +2899,16 @@ class Tracker:
         self._badges_next = time.time() + (6 if got else 3)
         if not got:
             return
+        got = tuple(got)
+        last, self._badges_last = getattr(self, "_badges_last", None), got
+        if last != got:
+            return  # one read isn't enough: the small badge digits are easily misread at 1080p
         c = load_career() or {}
+        bl = getattr(self, "_bloodline_rank", None)
+        if bl and time.time() - bl[1] < 1200 and got[1] != bl[0]:
+            got = (got[0], bl[0])  # the Bloodline Progress digits are bigger: trust them for the rank
         if (c.get("prestige"), c.get("rank")) != got:
+            log_to("rank.log", f"badges: prestige {got[0]} rank {got[1]} (was {c.get('prestige')} / {c.get('rank')})")
             c["prestige"], c["rank"] = got
             tmp = CAREER_PATH.with_suffix(".tmp")
             tmp.write_text(json.dumps(c, indent=2), encoding="utf-8")
@@ -2938,12 +2983,10 @@ class Tracker:
         """Discord overlay names saved before they were known: as killers (players or AI), players on
         the cards, or hunters. Runs at start and whenever a new one is learned."""
         VOICE_NAMES.update(self.hist.get("voice_names", []))
-        if not VOICE_NAMES:
-            return
 
-        def voice(n):
+        def voice(n):  # a Discord name, or screen text ("Danlagc", "Teams Wiped 2237") read as a name
             k = player_key(n or "")
-            return bool(k) and any(k.startswith(v) for v in VOICE_NAMES)
+            return bool(k) and (any(k.startswith(v) for v in VOICE_NAMES) or not_a_player(n))
         changed = False
         for m in self.hist["matches"]:
             touched = False
@@ -2951,13 +2994,17 @@ class Tracker:
                 for k in [k for k, v in votes.items() if voice(v.get("name"))]:
                     votes.pop(k)
                     touched = True
+                for v in votes.values():  # Discord text saved in a weapon ("LeMat Carbine GOV_PROPERTY")
+                    if v.get("weapon") and clean_weapon(v["weapon"]) != v["weapon"]:
+                        v["weapon"], touched = clean_weapon(v["weapon"]) or None, True
             cards = [n for n in m.get("cards", []) if not voice(n)]
             if cards != m.get("cards", []):
                 m["cards"], touched = cards, True
             if touched:
                 self._tally(m)
                 changed = True
-        for k in [k for k in self.hist["players"] if any(k.startswith(v) for v in VOICE_NAMES)]:
+        for k in [k for k, p in self.hist["players"].items()
+                  if any(k.startswith(v) for v in VOICE_NAMES) or not_a_player(p.get("name", ""))]:
             del self.hist["players"][k]
             changed = True
         if changed:
@@ -4978,7 +5025,8 @@ def diag_report(t: "Tracker") -> dict:
             "setup": setup, "counts": counts, "career": _db_keys(career),
             "logs": {"crash": _tail(DATA / "crash.log", 20000), "overlay": _tail(DATA / "overlay.log", 8000),
                      "capture": _tail(DATA / "capture_errors.log", 20000), "hunters": _tail(DATA / "hunters.log", 8000),
-                     "tray": _tail(DATA / "tray.log", 4000), "data": data_txt[:24900]},
+                     "tray": _tail(DATA / "tray.log", 4000), "rank": _tail(DATA / "rank.log", 4000),
+                     "data": data_txt[:24900]},
             "screens": _tail(DATA / "screen_log.jsonl", 100000)}
 
 

@@ -19,6 +19,9 @@ OVERLAY (the default)
 - Prefer a window on a second monitor? Click OVERLAY (or right-click the icon > Windowed). It
   remembers your choice.
 
+NEW IN 1.0.17
+- Bug fixes.
+
 NEW IN 1.0.16
 - Bug fixes.
 
