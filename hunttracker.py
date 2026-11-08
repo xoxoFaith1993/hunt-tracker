@@ -31,7 +31,7 @@ from xml.sax.saxutils import escape
 
 FROZEN = getattr(sys, "frozen", False)  # the installed .exe
 # "Publish Update.bat" bumps this and uploads the build; installed copies update themselves to it.
-VERSION = "1.0.19"
+VERSION = "1.0.20"
 UPDATE_REPO = "xoxoFaith1993/hunt-tracker"
 # A one-file .exe unpacks to a temp folder that __file__ points into; the install folder is the exe's.
 HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
@@ -3054,7 +3054,7 @@ class Tracker:
                 changed = True
         # Misread spellings of one hunter, rarest first, folded into the spelling played most.
         counts: dict = {}
-        for m in self.hist["matches"]:
+        for m in self.all_matches():
             if m.get("hunter"):
                 counts[m["hunter"]] = counts.get(m["hunter"], 0) + 1
         names_ = set(counts) | set(self.hist.get("hunter_names", {}))
@@ -3062,7 +3062,7 @@ class Tracker:
             to = self.known_hunter(hn)
             if to == hn:
                 continue
-            for m in self.hist["matches"]:
+            for m in self.all_matches():
                 if m.get("hunter") == hn:
                     m["hunter"] = to
             for store in ("hunter_names", "hunter_levels"):
@@ -3072,7 +3072,7 @@ class Tracker:
                     st.setdefault(to, val if store == "hunter_levels" else val.replace(hn, to, 1))
             counts[to] = counts.get(to, 0) + counts.pop(hn, 0)
             changed = True
-        for m in self.hist["matches"]:
+        for m in self.all_matches():
             hn = m.get("hunter")
             if not hn:
                 continue
@@ -3109,7 +3109,7 @@ class Tracker:
         hunter it's the end or start of ("Desert Rose")."""
         import difflib
         played: dict = {}
-        for m in self.hist["matches"]:
+        for m in self.all_matches():
             if m.get("hunter"):
                 played[m["hunter"]] = played.get(m["hunter"], 0) + 1
         known = set((load_career() or {}).get("hunter_kills", {})) | set(played)
@@ -3203,7 +3203,13 @@ class Tracker:
         if rh and time.time() - rh["t"] < 30 * 60:  # read while searching for this match
             m["hunter"], m["hunter_skin"] = rh["hunter"], rh["skin"]
         self.ready_hunter = None
-        self.hist["matches"] = (self.hist["matches"] + [m])[-100:]
+        ms = self.hist["matches"] + [m]
+        # Only 100 matches are kept in full; the hunter and kills of older ones stay, so hunter counts
+        # and kills don't shrink as matches drop off.
+        old = self.hist.setdefault("old_matches", [])
+        for d in ms[:-100]:
+            old.append({k: d[k] for k in ("key", "hunter", "kills") if d.get(k) is not None})
+        self.hist["matches"] = ms[-100:]
         c = load_career()
         if c and c.pop("deltas", None) is not None:  # the green +N notes last until the next match
             CAREER_PATH.write_text(json.dumps(c, indent=2), encoding="utf-8")
@@ -3240,7 +3246,7 @@ class Tracker:
         from match summaries since the tracker first saw you play that hunter."""
         hk = dict((load_career() or {}).get("hunter_kills", {}))
         played: dict = {}
-        for m in self.hist["matches"]:
+        for m in self.all_matches():
             if m.get("hunter"):
                 played.setdefault(m["hunter"], []).append(m)
         out = []
@@ -3250,6 +3256,10 @@ class Tracker:
             kills = hk.get(hunter, {}).get("n", 0) + sum(m.get("kills", 0) for m in ms if m["key"] >= since)
             out.append((hunter, kills, len(ms)))
         return sorted(out, key=lambda r: (-r[1], r[0]))
+
+    def all_matches(self) -> list:
+        """Every match's key, hunter and kills: the 100 kept in full plus the older ones."""
+        return self.hist.get("old_matches", []) + self.hist["matches"]
 
     def current_hunter_kills(self):
         """(hunter, kills) for the hunter you're playing: the one you've readied up with, else your last
@@ -3267,13 +3277,13 @@ class Tracker:
         loading card showing it, plus "Hunters Killed" from that match's summary and later matches
         played with the same hunter."""
         hk = dict((load_career() or {}).get("hunter_kills", {}))
-        for m in self.hist["matches"]:
+        for m in self.all_matches():
             if m.get("hunter") and m["hunter"] not in hk and m.get("kills"):
                 hk[m["hunter"]] = {"n": 0, "match": m["key"]}
         if not hk:
             return None
         def total(hunter, rec):
-            return rec["n"] + sum(m.get("kills", 0) for m in self.hist["matches"]
+            return rec["n"] + sum(m.get("kills", 0) for m in self.all_matches()
                                   if m["key"] >= rec.get("match", 0) and m.get("hunter") == hunter)
         return max(((h, total(h, r)) for h, r in hk.items()), key=lambda hn: hn[1])
 
@@ -3455,7 +3465,7 @@ class Tracker:
         c = load_career() or {}
         since = c.get("kills_at") if "Players Killed" in c.get("headline", {}) else c.get("weapons_at", 0)
         since = since or 0
-        return sum(m.get("kills", 0) for m in self.hist["matches"] if m["key"] > since)
+        return sum(m.get("kills", 0) for m in self.all_matches() if m["key"] > since)
 
     def new_death(self, n: int) -> None:
         """n = which real death of this match (a reopened death screen keeps the same n)."""
@@ -3770,7 +3780,7 @@ class Tracker:
             "hunter_table": [(self.hist.get("hunter_names", {}).get(hn, hn), k, n) for hn, k, n in self.hunter_table()],
             "hunter_level": self.current_hunter_level(),
             # Your best single hunt: "Hunters Killed +N" from match summaries.
-            "best_hunt": max((m["kills"] for m in self.hist["matches"] if m.get("kills")), default=None),
+            "best_hunt": max((m["kills"] for m in self.all_matches() if m.get("kills")), default=None),
             "hidden_families": self.cfg.get("hidden_families", []),
             "hidden_types": self.cfg.get("hidden_types", []),
             "mmr": self.hist["mmr"][-1][1] if self.hist["mmr"] else None,
@@ -4427,7 +4437,9 @@ def scene(v: dict, min_h: int = 0, W: int = 360, block_at=None, block: str = "de
             y += 24
         if v.get("hunter_table"):
             y = section(y + 4, "KILLS BY HUNTER")
-            y = rows2(y, [(f"{hn}  ({n} hunt{'s' if n != 1 else ''})", k) for hn, k, n in v["hunter_table"]]) + 6
+            # No hunts tracked (kills only from your card, matches played before the tracker): no count.
+            y = rows2(y, [(f"{hn}  ({n} hunt{'s' if n != 1 else ''})" if n else hn, k)
+                          for hn, k, n in v["hunter_table"]]) + 6
         if c.get("empty"):
             text(PAD, y, "fills in when you open your Statistics pages in Hunt", 10, C["dim"])
             return y + 18
@@ -5022,7 +5034,7 @@ def diag_report(t: "Tracker") -> dict:
     career = {k: c[k] for k in ("headline", "other", "weapon_types", "weapon_families", "hunter_kills",
                                  "top_variant", "profile_stats", "prestige", "rank", "updated") if k in c}
     career.update({"mmr": t.hist["mmr"][-1][1] if t.hist.get("mmr") else None, "total_known_kills": known,
-                   "best_hunt": max((m["kills"] for m in t.hist.get("matches", []) if m.get("kills")), default=None),
+                   "best_hunt": max((m["kills"] for m in t.all_matches() if m.get("kills")), default=None),
                    "hunts_tracked": len(hunts), "hours_hunting": round(sum(h.get("d", 0) for h in hunts) / 3600, 1)})
     # The saved data behind what's on screen (recent matches, hunters, squad), so a wrong row can be
     # traced to what was read. Sign-in details are never included.
