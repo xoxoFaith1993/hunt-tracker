@@ -31,7 +31,7 @@ from xml.sax.saxutils import escape
 
 FROZEN = getattr(sys, "frozen", False)  # the installed .exe
 # "Publish Update.bat" bumps this and uploads the build; installed copies update themselves to it.
-VERSION = "1.0.17"
+VERSION = "1.0.18"
 UPDATE_REPO = "xoxoFaith1993/hunt-tracker"
 # A one-file .exe unpacks to a temp folder that __file__ points into; the install folder is the exe's.
 HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
@@ -949,6 +949,9 @@ VOICE_TAG = re.compile(r"^(live|uve|ulwe|lwe|lis)$", re.I)
 VOICE_ICON = re.compile(r"^(@|®|©|•+|n|i|l|io\)|i0\)|\d*\)+)$", re.I)
 
 
+VOICE_MIN = 5  # a learned Discord name shorter than this is a cut-off fragment
+
+
 def strip_voice(words):
     if not words:
         return words
@@ -970,7 +973,7 @@ def strip_voice(words):
                 name.insert(0, ln[j])
                 j -= 1
             k = player_key(" ".join(x[4] for x in name))
-            if len(k) >= 3 and k not in VOICE_NAMES:
+            if len(k) >= VOICE_MIN and k not in VOICE_NAMES:
                 VOICE_NAMES.add(k)
                 VOICE_STATE["new"] = True
     if not VOICE_NAMES:
@@ -2907,6 +2910,19 @@ class Tracker:
         bl = getattr(self, "_bloodline_rank", None)
         if bl and time.time() - bl[1] < 1200 and got[1] != bl[0]:
             got = (got[0], bl[0])  # the Bloodline Progress digits are bigger: trust them for the rank
+        if got[0] == c.get("prestige") and isinstance(c.get("rank"), int) and got[1] < c["rank"]:
+            # Rank only climbs until you prestige: a lower one is usually a misread digit.
+            low = getattr(self, "_rank_low", None)
+            now = time.time()
+            if not low or low["rank"] != got[1]:
+                low = self._rank_low = {"rank": got[1], "n": 1, "t": now}
+            elif now - low["t"] >= 60:
+                low["n"], low["t"] = low["n"] + 1, now
+            if low["n"] < 3:
+                if low["n"] == 1 and low["t"] == now:
+                    log_to("rank.log", f"badges: ignored rank {got[1]} (lower than {c['rank']})")
+                return
+        self._rank_low = None
         if (c.get("prestige"), c.get("rank")) != got:
             log_to("rank.log", f"badges: prestige {got[0]} rank {got[1]} (was {c.get('prestige')} / {c.get('rank')})")
             c["prestige"], c["rank"] = got
@@ -2983,6 +2999,11 @@ class Tracker:
         """Discord overlay names saved before they were known: as killers (players or AI), players on
         the cards, or hunters. Runs at start and whenever a new one is learned."""
         VOICE_NAMES.update(self.hist.get("voice_names", []))
+        for v in [v for v in VOICE_NAMES if len(v) < VOICE_MIN]:
+            VOICE_NAMES.discard(v)
+        if self.hist.get("voice_names") and sorted(VOICE_NAMES) != self.hist["voice_names"]:
+            self.hist["voice_names"] = sorted(VOICE_NAMES)
+            self._save()
 
         def voice(n):  # a Discord name, or screen text ("Danlagc", "Teams Wiped 2237") read as a name
             k = player_key(n or "")
@@ -3069,7 +3090,7 @@ class Tracker:
             return False
         if not HUNTER_SHAPE.match(name.strip()):
             return False
-        if any(k.startswith(v) for v in VOICE_NAMES | set(self.hist.get("voice_names", []))):
+        if any(k.startswith(v) for v in VOICE_NAMES | set(self.hist.get("voice_names", [])) if len(v) >= VOICE_MIN):
             return False
         names = list((self.hist.get("squad") or {}).get("names", []))
         for m in self.hist["matches"][-20:]:
@@ -3109,7 +3130,7 @@ class Tracker:
         m, me = self.hist["matches"][-1], self._me()
         for p in players:
             if me and self._key(p["name"]) == me:
-                if p["hunter"] and self.hunter_ok(p["hunter"]):
+                if p["hunter"] and self.hunter_ok(self.known_hunter(p["hunter"])):
                     self.record_ready_hunter(p["hunter"], p["full"], p["level"])
                     if not m.get("hunter"):
                         m["hunter"] = self.known_hunter(p["hunter"])
@@ -3127,6 +3148,7 @@ class Tracker:
     def record_ready_hunter(self, hunter: str, full: str, level=None) -> None:
         """The hunter on screen in the lobby. Switch, and the next read replaces it; the match found
         next takes whatever was last read. Its level ("11 / 50") is kept per hunter."""
+        hunter = self.known_hunter(hunter)
         if not self.hunter_ok(hunter):
             log_to("hunters.log", f"lobby/menu: turned down {hunter!r} ({full!r})")
             return
@@ -3574,7 +3596,7 @@ class Tracker:
 
     def _save(self) -> None:
         with self.lock:
-            if VOICE_NAMES:
+            if VOICE_NAMES or self.hist.get("voice_names"):
                 self.hist["voice_names"] = sorted(VOICE_NAMES)
             try:
                 tmp = HISTORY_PATH.with_suffix(".tmp")
@@ -4992,6 +5014,7 @@ def diag_report(t: "Tracker") -> dict:
     c = load_career() or {}
     hunts = [h for s_ in t.hist.get("sessions", {}).values() for h in s_.get("hunts", [])]
     known, _src, _extra = known_kills(c, t.summary_kills()) if c else (None, "", 0)
+    c = apply_live(c, 0, 0) if c else c  # fills in K/D when the Statistics page didn't give it
     career = {k: c[k] for k in ("headline", "other", "weapon_types", "weapon_families", "hunter_kills",
                                  "top_variant", "profile_stats", "prestige", "rank", "updated") if k in c}
     career.update({"mmr": t.hist["mmr"][-1][1] if t.hist.get("mmr") else None, "total_known_kills": known,
