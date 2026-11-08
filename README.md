@@ -24,31 +24,55 @@ click **More info → Run anyway**.
 
 ## What's new in 1.0.20
 
-- Bug fixes.
+- Hunters no longer lose their hunt count (and the tracker's own kill count) once their matches are older than the last 100. A hunter with no tracked hunts shows just its name instead of "(0 hunts)".
+- Most kills in one hunt and Career kills keep counting matches older than the last 100.
 
 ## What's new in 1.0.19
 
-- Bug fixes.
+- A weapon's skin name is no longer read as part of the killer's weapon on the death screen.
 
 ## What's new in 1.0.18
 
-- Bug fixes.
+- Your rank no longer drops when a digit is misread; it only goes down after you prestige.
+- Short fragments of Discord names are no longer used to filter players, so real players are no longer hidden by them.
+- Slightly misread hunter names are matched to the hunter you've been playing instead of being thrown away.
+- Diagnostics reports include your K/D.
 
 ## What's new in 1.0.17
 
-- Bug fixes.
+- The death screen's Damage History tab is no longer read as a killer.
+- Screen text such as headings and score lines is no longer saved as players, and ones saved earlier are removed.
+- Weapon names on the death screen no longer pick up stray tags or letters.
+- Your hunter is now read from the end-of-match summary after you die.
+- Career K/D is worked out from your kills and deaths when the Statistics page doesn't show it.
 
 ## What's new in 1.0.16
 
-- Bug fixes.
+- The number row under player badges is no longer saved as a player.
+- A player's name now shows the spelling read most often, so one misread no longer replaces it.
+- Misread spellings of your hunter's name are merged into the right hunter.
 
 ## What's new in 1.0.15
 
-- Bug fixes.
+- The tracker now opens a minute after Hunt starts instead of straight away, so it doesn't start while the game's anti-cheat is loading.
+- Player and Discord names are no longer taken as your hunter.
+- Your own loading card no longer shows up as another player.
+- Discord's in-game overlay is no longer read as part of the game.
+- The tray icon comes back if Windows drops it (for example when the taskbar restarts).
+- KILLED BY shows how often you've met that killer.
+- Player Summary uses the extra space in a wide window.
+- "Send diagnostics now" in the tray menu, and more detail in diagnostics reports to help track down misreads.
 
 ## What's new in 1.0.14
 
-- Bug fixes.
+- Prestige and rank update within a few seconds of opening the squad stats or Equipment page, and are also read from the lobby banner, killer plates and Bloodline Progress.
+- The Equipment page is no longer read as a squad, and the hunter row is no longer read as player names.
+- Players with all-zero stats stay on the loading cards.
+- A loading-screen tip is no longer read as a death screen.
+- A killer's hunter, weapon and rank are now what most frames of the death screen agree on.
+- Player Summary's "matches read" no longer stops at 100.
+- The weapon list in the overlay no longer opens in the top-left corner.
+- Rank bar to 100 on the Career page, and teammates' and killers' prestige / rank shown with the game's medal and skull icons.
 
 ## What's new in 1.0.13
 
