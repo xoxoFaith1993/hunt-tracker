@@ -19,6 +19,10 @@ OVERLAY (the default)
 - Prefer a window on a second monitor? Click OVERLAY (or right-click the icon > Windowed). It
   remembers your choice.
 
+NEW IN 1.0.21
+- A player's name no longer shows up twice in your player log when an icon in front of it was read
+  as a "1".
+
 NEW IN 1.0.20
 - Hunters no longer lose their hunt count (and the tracker's own kill count) once their matches
   are older than the last 100. A hunter with no tracked hunts shows just its name instead of

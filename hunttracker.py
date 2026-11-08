@@ -31,7 +31,7 @@ from xml.sax.saxutils import escape
 
 FROZEN = getattr(sys, "frozen", False)  # the installed .exe
 # "Publish Update.bat" bumps this and uploads the build; installed copies update themselves to it.
-VERSION = "1.0.20"
+VERSION = "1.0.21"
 UPDATE_REPO = "xoxoFaith1993/hunt-tracker"
 # A one-file .exe unpacks to a temp folder that __file__ points into; the install folder is the exe's.
 HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
@@ -1544,7 +1544,10 @@ def trim_name(seg: list) -> str:
         core = re.sub("[^0-9A-Za-z]", "", word)
         return len(core) <= 1 and not re.fullmatch("[A-Z0-9]", core)
 
-    while len(seg) > 1 and junk(seg[0][4]):
+    # An icon in front of a name read as "1" ("1 • Name" on the cards, "1 Name" in Team Details,
+    # while other frames read "Name"): a lone 1 before a whole name isn't part of it.
+    while len(seg) > 1 and (junk(seg[0][4]) or seg[0][4] == "1"
+                            and len(re.sub("[^0-9A-Za-z]", "", "".join(q[4] for q in seg[1:]))) >= 3):
         seg = seg[1:]
     while len(seg) > 1 and junk(seg[-1][4]):
         seg = seg[:-1]

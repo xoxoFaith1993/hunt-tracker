@@ -22,6 +22,10 @@ it and reopens. Your data is kept.
 Windows may warn that the app is from an unknown publisher the first time (it isn't code-signed):
 click **More info → Run anyway**.
 
+## What's new in 1.0.21
+
+- A player's name no longer shows up twice in your player log when an icon in front of it was read as a "1".
+
 ## What's new in 1.0.20
 
 - Hunters no longer lose their hunt count (and the tracker's own kill count) once their matches are older than the last 100. A hunter with no tracked hunts shows just its name instead of "(0 hunts)".
