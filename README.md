@@ -22,6 +22,10 @@ it and reopens. Your data is kept.
 Windows may warn that the app is from an unknown publisher the first time (it isn't code-signed):
 click **More info → Run anyway**.
 
+## What's new in 1.0.19
+
+- Bug fixes.
+
 ## What's new in 1.0.18
 
 - Bug fixes.

@@ -31,7 +31,7 @@ from xml.sax.saxutils import escape
 
 FROZEN = getattr(sys, "frozen", False)  # the installed .exe
 # "Publish Update.bat" bumps this and uploads the build; installed copies update themselves to it.
-VERSION = "1.0.18"
+VERSION = "1.0.19"
 UPDATE_REPO = "xoxoFaith1993/hunt-tracker"
 # A one-file .exe unpacks to a temp folder that __file__ points into; the install folder is the exe's.
 HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
@@ -1604,7 +1604,9 @@ def clean_weapon(txt: str) -> str:
         if 0 < i <= 3 and txt[:i].isupper() and " " not in txt[:i]:
             txt = txt[i:]
             break
-    return re.sub(r"\s+", " ", txt).strip()
+    txt = re.sub(r"\s+", " ", txt).strip()
+    # The skin line read as part of the name: "Vetterli 71 Cyclone Envenom: Cyclone" (older saves).
+    return re.sub(r"^(.*\b(\w+)) [^:]+: ?\2$", r"\1", txt)
 
 
 def read_death(words: list, width: int, height: int, px: bytes = b"") -> dict:
@@ -1644,6 +1646,8 @@ def read_death(words: list, width: int, height: int, px: bytes = b"") -> dict:
             for nxt in left[i + 1:i + 3]:
                 if not nxt or re.search(r"distance|related|traits", nxt, re.I):
                     break
+                if parts and (":" in nxt or nxt.endswith(("...", "…"))):
+                    break  # the weapon's skin ("Envenom: Cyclone") or a cut-off line ("A..."), not more name
                 parts.append(nxt)
             weapon = clean_weapon(" ".join(parts)) or None
             break
