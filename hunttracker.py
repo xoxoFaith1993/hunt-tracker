@@ -31,7 +31,7 @@ from xml.sax.saxutils import escape
 
 FROZEN = getattr(sys, "frozen", False)  # the installed .exe
 # "Publish Update.bat" bumps this and uploads the build; installed copies update themselves to it.
-VERSION = "1.0.21"
+VERSION = "1.0.22"
 UPDATE_REPO = "xoxoFaith1993/hunt-tracker"
 # A one-file .exe unpacks to a temp folder that __file__ points into; the install folder is the exe's.
 HERE = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
@@ -1276,6 +1276,14 @@ def read_columns(words: list, height: int, px: bytes = b"", width: int = 0) -> l
     lines = ocr_lines(words)
     is_num = lambda seg: all(NUM.match(q[4]) for q in seg)  # noqa: E731
 
+    def num_seg(seg):
+        """A number on a row, but not a barcode name OCR read as digits ("111"): its pixels are boxes."""
+        if not is_num(seg):
+            return False
+        q = seg[0]
+        return not (px and len(seg) == 1 and BARCODE_JUNK.match(q[4])
+                    and barcode_at(px, width, q[0] - q[3], q[0] + q[2] + q[3], q[1] - q[3] // 2, q[1] + q[3] * 3 // 2))
+
     def segments(ws):
         """Split a line at wide gaps, then glue each lone number back onto the label before it."""
         segs = [[ws[0]]]
@@ -1335,7 +1343,7 @@ def read_columns(words: list, height: int, px: bytes = b"", width: int = 0) -> l
         if ws[0][1] < height * 0.06:
             continue  # the menu bar across the top ("PLAY  HUNTERS  Statistics ...")
         segs = segments(ws)
-        if any(is_num(s) for s in segs) or title_row(k, segs):
+        if any(num_seg(s) for s in segs) or title_row(k, segs):
             continue
         if len(segs) >= 2 and all(NUM.match(s[-1][4]) and len(s) >= 2 for s in segs):
             continue  # the lobby's hunter row ("Cousin Jed 12  Lynch 0"), not names
@@ -1364,7 +1372,7 @@ def read_columns(words: list, height: int, px: bytes = b"", width: int = 0) -> l
         segs = [sg for sg in segments(ws) if len(re.sub("[^0-9A-Za-z]", "", " ".join(q[4] for q in sg))) >= 3]
         below = range(k + 1, first_stat)
         hunters = len(segs) >= 2 and all(NUM.match(sg[-1][4]) and len(sg) >= 2 for sg in segs)
-        if (segs and not hunters and not title_row(k, segs) and not any(is_num(sg) for sg in segs)
+        if (segs and not hunters and not title_row(k, segs) and not any(num_seg(sg) for sg in segs)
                 and (all(NUM.match(q[4]) for q in lines[k + 1])
                      or (len(below) >= 2 and badge_row(k + 1)
                          and all(badge_row(j) or title_row(j, segments(lines[j])) for j in below)))
@@ -2226,6 +2234,14 @@ def start_summary_capture(t: "Tracker") -> None:
                         t.record_ready_hunter(*picked)
                     # Only the squad stats screen: the 3D team lobby turned banners and text into fake names.
                     cols = read_columns(lw, h, px, w)
+                    # The squad stats page goes in the screen log once per change (players read, or
+                    # none when it's on screen and nothing could be), so a missed read shows up there.
+                    if re.search(r"honored contracts|grand slam|running the gauntlet", " ".join(q[4] for q in lw), re.I):
+                        seen = [(c["name"], len(c["stats"])) for c in cols]
+                        if seen != was.get("squad_seen"):
+                            was["squad_seen"] = seen
+                            log_screen("squad_page", w, h, lw, [{k: c.get(k) for k in ("name", "stats", "hidden")}
+                                                               for c in cols])
                     if cols and max(len(c["stats"]) for c in cols) >= 5:
                         t.record_players(cols, "lobby", "")
                         t.note_badges(cols, px, w)

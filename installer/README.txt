@@ -19,6 +19,11 @@ OVERLAY (the default)
 - Prefer a window on a second monitor? Click OVERLAY (or right-click the icon > Windowed). It
   remembers your choice.
 
+NEW IN 1.0.22
+- The squad Statistics page in the lobby is read again when a teammate has a name shown as
+  boxes. Before, one such name stopped every player on the page from being saved, including the
+  boxed name itself.
+
 NEW IN 1.0.21
 - A player's name no longer shows up twice in your player log when an icon in front of it was read
   as a "1".

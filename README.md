@@ -22,6 +22,10 @@ it and reopens. Your data is kept.
 Windows may warn that the app is from an unknown publisher the first time (it isn't code-signed):
 click **More info → Run anyway**.
 
+## What's new in 1.0.22
+
+- The squad Statistics page in the lobby is read again when a teammate has a name shown as boxes. Before, one such name stopped every player on the page from being saved, including the boxed name itself.
+
 ## What's new in 1.0.21
 
 - A player's name no longer shows up twice in your player log when an icon in front of it was read as a "1".
